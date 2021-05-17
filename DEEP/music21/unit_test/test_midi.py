@@ -1,11 +1,11 @@
-import config_bach
 import music21
 from music21 import converter, instrument, note, chord, stream
 from music21 import corpus
 
 print('test midi')
 
-my_instrument = config_bach.my_instrument
+# piano default instrument
+
 music21_output_list=[]
 offset = 0
 
@@ -14,12 +14,15 @@ duration_in_quarter = 0.5  # actual len of note
 offset_increment = 0.5 # spacing, if > duration, blank
 velocity = 100
 
+#music21_output_list.append(instrument.Flute())
+
 for pi in range(20):
     n = note.Note(60+pi)
     n.offset = offset # note offset
-    n.storedInstrument = my_instrument 
+    # https://stackoverflow.com/questions/55170188/how-to-make-midi-file-from-notes-with-flute-instrument-in-python-music21-librar
     n.duration.quarterLength = duration_in_quarter  
     n.volume.velocity = velocity
+    music21_output_list.append(instrument.Flute())
     music21_output_list.append(n) # list of notes object
 
     #offset = offset + offset_increment # else, notes stacked. sound better than adding duration
