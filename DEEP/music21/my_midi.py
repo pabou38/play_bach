@@ -352,36 +352,33 @@ def create_MIDI_file(list_of_pitch, list_of_duration, list_of_velocity, file):
     # list of velocity is [] for model 2 and no predict velocity
     # list are seqlen+nb_predict, strings
 
+    # file is name of MIDI file
+
     my_instrument = config_bach.my_instrument
-    print('create MIDI file from list of STR. instrument from config file: ', my_instrument)
+    print('create MIDI file with instrument %s. MIDI file %s: ' %(my_instrument, file))
 
     ####################################################################################
     # offset is either a fixed offset from config file, or a variable offset depending on sunnyvale pressure
-    ##  offset increment at the end to prevent stacking
+    # or based on duration. offset prevents stacking
     ####################################################################################
 
     if config_bach.offset_config == 'd':
         fixed_offset_increment = config_bach.fixed_midi_offset_increment
     else:
         fixed_offset_increment = get_weather() # offset between notes depend on pressure
-    
-    print('fixed offset for MIDI file (config or output from weather): ', fixed_offset_increment)
 
+    if config_bach.use_fixed_offset_midi:
+        print('offset in MIDI file is fix ', fixed_offset_increment)
+    else:
+        print('offset in MIDI file depend on duration')
     
-    # DURATION: can use random from common duration or fixed duration from config_bach.fixed_duration_midi_file
-    # BEWARE of duration zero
+        # DURATION: can use random from common duration or fixed duration from config_bach.fixed_duration_midi_file or predicted
+        # BEWARE of duration zero
 
-    #duration = config_bach.fixed_duration_midi_file
     #[('$0.2', 14069), ('$0.5', 10750), ('$1.0', 2907), ('$0.0', 1290), ('$0.3', 714)]
 
-    
-    music21_output_list=[] # list of music21 objects , notes, rest and chord objects, later streamed to MIDI
+    music21_output_list=[] # list of music21 objects , notes, rest and chord objects, later streamed to MIDI file
     offset =0 # start of offset. 
-
-    """
-        in music21 object, both duration and offset attributes are set
-        WARNING: not sure if this works 
-    """
 
     # use idx to step thru pitch and other 2 string lists 
     for idx, x in enumerate(list_of_pitch):  # for seed + predict
@@ -396,24 +393,19 @@ def create_MIDI_file(list_of_pitch, list_of_duration, list_of_velocity, file):
         # set velocity as int, hardcoded to some default
 
         if config_bach.model_type == 1: 
-
             # check if $ exist; if yes, duration is encoded there
             if '$' in x:
                 # duration as encoded in pitch
                 duration = x.split('$')[1]
                 duration.replace('$','')
                 duration_in_quarter=float(duration) # str to float
-                pi = x.split('$')[0]
-                
-            else:
-                # no duration encoded
+                pi = x.split('$')[0] # can be a note or chord
+            else: # duration not encoded
                 pi=x
-                """
                 # set per notes duration at random
                 # common duration  [('X0.2', 14069), ('X0.5', 10750), ('X1.0', 2907), ('X0.0', 1290), ('X0.3', 714)]
-                duration = random.choice(common_duration)[0]
-                duration = duration.replace('$', '')
-                """
+                #duration = random.choice(common_duration)[0]
+                #duration = duration.replace('$', '')
                 duration = config_bach.fixed_duration_midi_file # use config duration
                 duration_in_quarter = float(duration)
 
@@ -437,62 +429,59 @@ def create_MIDI_file(list_of_pitch, list_of_duration, list_of_velocity, file):
             else:
                 velocity = 100
 
-        # pi str,  duration_in_quarter float, and velocity int 
+        # append this element to output list of music21 objects
 
-        ############################################################
+        # pi str,  duration_in_quarter float, and velocity int 
         # process notes, chords, rest
         # use above velocity and duration_in_quarter for notes, and notes in chords
-        ############################################################
+
+         # https://stackoverflow.com/questions/55170188/how-to-make-midi-file-from-notes-with-flute-instrument-in-python-music21-librar
            
-        #### CHORD
+        # pi is a CHORD  can be 1.2 or A4.A5
         if ('.' in pi): # chords, multiples notes at the same time
-            # no true  R$0.2 
-            # this is a chord 
             notes_in_chord = pi.split('.') # 11.2 or F4.G5  depending on normal
             # '4'.split('.') return 4. no need at add extra dots. will generate empty string in split
             
             nn = [] # list of notes objects              
             #note.Note(index or 'C3') returns note object
             
-            try: # get all notes from chord
-                for p in notes_in_chord:
-                    if config_bach.normal:  # 1.2
-                        n=note.Note(int(p))  # integer to notes object
+            try: 
+                for p in notes_in_chord:  # list of all notes in chord
+                    if config_bach.normal:  
+                        n=note.Note(int(p))  # create Note object integer to notes object 
                     else:
-                        n=note.Note(p) # # C4.D3 convert to note object   # exception raise PitchException("Cannot make a step out of '%s'" % usrStr)
+                        n=note.Note(p) # exception raise PitchException("Cannot make a step out of '%s'" % usrStr)
+                    #n.storedInstrument = my_instrument  # individual note instrument
+                    n.duration.quarterLength = duration_in_quarter # invididual duration notes, but will be the same for all notes in chords
+                    n.volume.velocity = velocity
+                    nn.append(n) # all notes object in Chord
+
             except Exception as e:
                 print ('exception chord error %s pi %s note_in_chord %s p %s' %( str(e) , pi, notes_in_chord, p ))
                 #Cannot make a step out of 'R' R$0.2 ['R$0', '2'] R$0
-                
-            n.storedInstrument = my_instrument  # individual note instrument
-            n.duration.quarterLength = duration_in_quarter # invididual duration notes, but will be the same for all notes in chords
-            n.volume.velocity = velocity
 
-            nn.append(n) # list if notes objects
-
-               
-            if nn:   # create music21 chord from list of music21 notes
-                c = chord.Chord(nn) # chord object from list of notes objects
-                c.offset = offset # 
-                music21_output_list.append(c)
-                    
-        #####   REST
+            c = chord.Chord(nn) # create chord object from list of music21 notes objects
+            c.offset = offset 
+            music21_output_list.append(my_instrument)
+            music21_output_list.append(c) # append this chord
+            
+        # pi is a REST
         elif (pi == 'R'): # rest
             r = note.Rest()
             r.duration.quarterLength = duration_in_quarter
             r.offset = offset # note offset
-            music21_output_list.append(r) # list of notes object
+            music21_output_list.append(r) # append this rest
         
-        ######  NOTE
-        else: # this is note 'C3'
-       
-            try: # n is a note object
-                n = note.Note(pi) # convert string to note object, used to create stream
+        # pi is a NOTE
+        else: # this is note 'C3' or 2
+            try: 
+                n = note.Note(pi) # convert string or int to note object, used to create stream
                 n.offset = offset # note offset
-                n.storedInstrument = my_instrument 
+                #n.storedInstrument = my_instrument 
                 n.duration.quarterLength = duration_in_quarter  
-                n.volume.velocity = velocity    
-                music21_output_list.append(n) # list of notes object
+                n.volume.velocity = velocity
+                music21_output_list.append(my_instrument)
+                music21_output_list.append(n) # append this note
             except Exception as e:
                 print ('Exception note', str(e) , pi)
             
@@ -507,12 +496,13 @@ def create_MIDI_file(list_of_pitch, list_of_duration, list_of_velocity, file):
             offset = offset + duration_in_quarter # else, notes stacked 
             # should also cover REST
 
-    
-    # done with all input, ie nb predict list of (str,str)
-    pabou.inspect("music21_output_list, ie list of music21 notes, chord and rest objects ", music21_output_list)
+    # done with seed and all predictions
+
+    pabou.inspect("music21_output_list ", music21_output_list)
     
     # convert list of music21 object to midi file
     print("convert list of music21 object to MIDI file: ", file)
     midi_stream = stream.Stream(music21_output_list)
     midi_stream.write('midi', fp = file)
     print('==== > MIDI file created')
+    
