@@ -12,13 +12,13 @@ import tensorflow as tf
 import config_bach
 
 try:
-    print ('importing pabou helper')
+    print ('MIDI: importing pabou helper')
     import pabou # various helpers module, one dir up
     # pip install prettytable
     print('pabou helper path: ', pabou.__file__)
     #print(pabou.__dict__)
 except:
-    print('cannot import pabou')
+    print('MIDI: cannot import pabou')
     exit(1)
 
 
@@ -50,14 +50,10 @@ def get_weather():
 def create_predicted_MIDI_list(model, nb_predict, corpus_notes, corpus_duration, corpus_velocity, pi_to_int, du_to_int, ve_to_int, unique_pi_list, unique_du_list, unique_ve_list):
 
     temp = config_bach.temperature_midi
-    if config_bach.temperature_midi != 0:
-        print('use temperature ', temp)
-    else:
-        print('do not use temperature')
 
     # get random start in corpus. 
     start = random.randint(0,len(corpus_notes)-config_bach.seqlen-1)
-    print ('predict list of %d elements. start at random %d within %d. model type: %d' %(nb_predict, start, len(corpus_notes), config_bach.model_type))
+    print ('MIDI: predict list of %d elements. start at random %d within %d. model type: %d' %(nb_predict, start, len(corpus_notes), config_bach.model_type))
     
     # SEED . list of seqlen str from corpus.
     real_pitch_seq = corpus_notes[start:start+config_bach.seqlen] 
@@ -109,29 +105,52 @@ def create_predicted_MIDI_list(model, nb_predict, corpus_notes, corpus_duration,
     # for model 2 created X,X1,X2. keep as int
     ################################################
 
-    if config_bach.model_type == 1:
+    if config_bach.model_type in [1,3]:
         # only use pitch
-
         # network_input_list is a list of seqlen integer indexes
-        X = np.asarray(pitch_input_list_int) # shape (50,) int32
+        X = np.asarray(pitch_input_list_int) # shape (40,) int32
 
-        # convert to one hot as in training
-        X = tf.keras.utils.to_categorical(X, num_classes=len(pi_to_int) ) #  one hot as in training . 
-        # WARNING. if numclass not set, hot may be less than expected, depending on the content of X
-        # shape(30,193) float32
-        # add batch dimension
-        X=np.reshape(X, (1 , config_bach.seqlen, len(pi_to_int)) ) # shape (nb_sample = 1,seqlen,feature dim)
+        # cast to expected input type
+        # dtype from keras model is tf.int32, need to convert to numpy
+        X = X.astype(model.inputs[0].dtype.as_numpy_dtype)
+
+        if config_bach.model_type == 1:
+            # convert to one hot as in training
+            X = tf.keras.utils.to_categorical(X, num_classes=len(pi_to_int) ) #  one hot as in training . 
+            # WARNING. if numclass not set, hot may be less than expected, depending on the content of X
+            # shape(30,193) float32
+            # add batch dimension
+            X=np.reshape(X, (1 , config_bach.seqlen, len(pi_to_int)) ) # shape (nb_sample = 1,seqlen,feature dim)
+        else:
+            pass # do not one hot. expect integers
+
+    if config_bach.model_type == 4:
+        X = np.asarray(pitch_input_list_int) # shape (100,) int32
+        # normalize
+        X = X - config_bach.model4_mean
+        X = X / config_bach.model4_std
+
+        X = np.reshape(X, (config_bach.size, config_bach.size))
+        X = X.astype(model.inputs[0].dtype.as_numpy_dtype)
+        # at this point (6,6) conv2D expect 4 dims
+        X = np.expand_dims(X,axis=0) # add batch
+        X = np.expand_dims(X,axis=-1) # (1,6,6,1)
 
     if config_bach.model_type == 2:
 
+        # vectorize and cast to expected input type
         # network_input_list is a list of seqlen integer indexes
         X = np.asarray(pitch_input_list_int)  #(30,)
-        X1= np.asarray(duration_input_list_int) # (30,)
-        X2= np.asarray(velocity_input_list_int) # (30,) # vectorize X2 even if possibly not used
+        X = X.astype(model.inputs[0].dtype.as_numpy_dtype) # input vs inputs
 
-        #cannot reshape array of size 30 into shape (1,30,129) , so reshape with feature dim = 1
+        X1= np.asarray(duration_input_list_int) # (30,)
+        X1 = X1.astype(model.inputs[1].dtype.as_numpy_dtype)
+
+        X2= np.asarray(velocity_input_list_int) # (30,) # vectorize X2 even if possibly not used
+        X2 = X2.astype(model.inputs[2].dtype.as_numpy_dtype)
+        # cannot reshape array of size 30 into shape (1,30,129) , so reshape with feature dim = 1
         # for embedding no need to reshape
-        
+
 
     # for model 1, only X is used, for model 2 [X,X1] or [X,X1,X2]
 
@@ -147,25 +166,31 @@ def create_predicted_MIDI_list(model, nb_predict, corpus_notes, corpus_duration,
         #https://www.pyimagesearch.com/2018/05/07/multi-label-classification-with-keras/
         # verbose 1, show timing
 
+        ############################ 
+        # model.predict, 
+        # get softmax, 
+        # temperature, 
+        # argmax index, 
+        # convert to string, 
+        # store predicted string, 
+        # check vs truth, 
+        # update int input list, 
+        # vectorize
         ############################
-        # Model 1. 
-        # model.predict, get softmax, temperature, argmax index, convert to string, store predicted string, check vs truth, update int input list, vectorize
-        ############################
+
+        # only use Full model for MIDI file (this is complex enough)
         
-        if config_bach.model_type ==1 :
+        if config_bach.model_type in [1,3,4] :
 
             start_time = time.time()
-
-            prediction = model.predict(X,verbose=0) #  one head
-
+            prediction = model.predict(X,verbose=0) #  one head 
             inference_time = inference_time + time.time() - start_time # accumulate
 
             prediction_pitch = prediction[0] # prediction[0] is an array of softmax of len unique pi. only ONE array
 
-            if config_bach.temperature != 0:
-                # modify proba, higher temp, increase surprise.
-                # dynamic temperature using remi
-                prediction_pitch = get_temperature_pred(prediction_pitch, temp)
+            # modify proba, higher temp, increase surprise.
+            # dynamic temperature using remi
+            prediction_pitch = pabou.get_temperature_pred(prediction_pitch, temp)
 
             index = np.argmax(prediction_pitch) # just take highest proba in softmax float32 np.sum(prediction) = 1.000001
             target_pi = unique_pi_list[index] # index from softmax converted to str label
@@ -194,11 +219,23 @@ def create_predicted_MIDI_list(model, nb_predict, corpus_notes, corpus_duration,
 
             # re vectorize for next iteration
             X = np.asarray(pitch_input_list_int) # shape (50,) int32
-            X = tf.keras.utils.to_categorical(X, num_classes = len(pi_to_int)) #  one hot as in training. SET num classes 
-            X=np.reshape(X, (1 , config_bach.seqlen, len(pi_to_int)) ) # shape (nb_sample = 1,seqlen,feature dim)   1,50,1 
+            X = X.astype(model.inputs[0].dtype.as_numpy_dtype)
+
+            if config_bach.model_type == 1:
+                X = tf.keras.utils.to_categorical(X, num_classes = len(pi_to_int)) #  one hot as in training. SET num classes 
+                X=np.reshape(X, (1 , config_bach.seqlen, len(pi_to_int)) ) # shape (nb_sample = 1,seqlen,feature dim)   1,50,1 
+
+            if config_bach.model_type == 4:
+                X = X - config_bach.model4_mean
+                X = X / config_bach.model4_std
+
+                X = np.reshape(X, (config_bach.size, config_bach.size))
+                X = np.expand_dims(X,axis=0) # add batch
+                X = np.expand_dims(X,axis=-1) # (1,6,6,1)
+        
             ######################################################
 
-        # end for model 1
+        # end for model 1 or 3
 
         ##########################################################################
         # Model 2
@@ -312,17 +349,17 @@ def create_predicted_MIDI_list(model, nb_predict, corpus_notes, corpus_duration,
     ###############################################################
 
     inference_time = inference_time / nb_predict
-    print('inference time average ms: %0.2f '  %(inference_time*1000.0))
+    print('MIDI: inference time average ms: %0.2f '  %(inference_time*1000.0))
 
-    print('predicted pitch  : ', list_of_predicted_pitch_str)
-    print('ground truth pitch: ', ground_truth_pitch)
+    print('MIDI: predicted pitch  : ', list_of_predicted_pitch_str)
+    print('MIDI: ground truth pitch: ', ground_truth_pitch)
 
-    print('ratio of good prediction (model 1 pi, model 2, pi and du): %0.1f' %(100.0 * good/nb_predict))
+    print('MIDI: ratio of good prediction (model 1 pi, model 2, pi and du): %0.1f' %(100.0 * good/nb_predict))
     # return list of strings, seqlen + nb_predic#
 
     assert config_bach.seqlen + config_bach.nb_predict == len(real_pitch_seq) + len(list_of_predicted_pitch_str)
 
-    if config_bach.model_type == 1:   
+    if config_bach.model_type in [1,3,4]:   
         return(real_pitch_seq + list_of_predicted_pitch_str, None, None) # list of str from proba to str labels
 
     if config_bach.model_type == 2: # 3 list real plus predicted. str
@@ -355,7 +392,7 @@ def create_MIDI_file(list_of_pitch, list_of_duration, list_of_velocity, file):
     # file is name of MIDI file
 
     my_instrument = config_bach.my_instrument
-    print('create MIDI file with instrument %s. MIDI file %s: ' %(my_instrument, file))
+    print('MIDI: create MIDI file with instrument %s. MIDI file %s: ' %(my_instrument, file))
 
     ####################################################################################
     # offset is either a fixed offset from config file, or a variable offset depending on sunnyvale pressure
@@ -368,9 +405,9 @@ def create_MIDI_file(list_of_pitch, list_of_duration, list_of_velocity, file):
         fixed_offset_increment = get_weather() # offset between notes depend on pressure
 
     if config_bach.use_fixed_offset_midi:
-        print('offset in MIDI file is fix ', fixed_offset_increment)
+        print('MIDI: offset in MIDI file is fix ', fixed_offset_increment)
     else:
-        print('offset in MIDI file depend on duration')
+        print('MIDI: offset in MIDI file depend on duration')
     
         # DURATION: can use random from common duration or fixed duration from config_bach.fixed_duration_midi_file or predicted
         # BEWARE of duration zero
@@ -383,16 +420,19 @@ def create_MIDI_file(list_of_pitch, list_of_duration, list_of_velocity, file):
     # use idx to step thru pitch and other 2 string lists 
     for idx, x in enumerate(list_of_pitch):  # for seed + predict
 
-        # set pi string for further processing into notes, chord and rest
+        #####################################################
+        # set pi, duratyion and velocity
+        # set pi as string 
         # set duration_in_quarter as float, from encoded in pitch, or predicted , or static config, or random from most common duration
         # set velocity as int, hardcoded or predicted
+        ######################################################
 
         ### MODEL 1
         # set pi string for further processing into notes, chord and rest
         # set duration_in_quarter as float, from encoded in pitch, or static config, 
         # set velocity as int, hardcoded to some default
 
-        if config_bach.model_type == 1: 
+        if config_bach.model_type in [1,3,4]: 
             # check if $ exist; if yes, duration is encoded there
             if '$' in x:
                 # duration as encoded in pitch
@@ -401,7 +441,7 @@ def create_MIDI_file(list_of_pitch, list_of_duration, list_of_velocity, file):
                 duration_in_quarter=float(duration) # str to float
                 pi = x.split('$')[0] # can be a note or chord
             else: # duration not encoded
-                pi=x
+                pi=x # R or D3
                 # set per notes duration at random
                 # common duration  [('X0.2', 14069), ('X0.5', 10750), ('X1.0', 2907), ('X0.0', 1290), ('X0.3', 714)]
                 #duration = random.choice(common_duration)[0]
@@ -429,13 +469,16 @@ def create_MIDI_file(list_of_pitch, list_of_duration, list_of_velocity, file):
             else:
                 velocity = 100
 
+        ###########################################################
+        # create music21 object based on pi, duration and velocity
+        # object cabn be note, chord or rest
         # append this element to output list of music21 objects
+        ###########################################################
 
         # pi str,  duration_in_quarter float, and velocity int 
         # process notes, chords, rest
         # use above velocity and duration_in_quarter for notes, and notes in chords
-
-         # https://stackoverflow.com/questions/55170188/how-to-make-midi-file-from-notes-with-flute-instrument-in-python-music21-librar
+        # https://stackoverflow.com/questions/55170188/how-to-make-midi-file-from-notes-with-flute-instrument-in-python-music21-librar
            
         # pi is a CHORD  can be 1.2 or A4.A5
         if ('.' in pi): # chords, multiples notes at the same time
@@ -450,14 +493,15 @@ def create_MIDI_file(list_of_pitch, list_of_duration, list_of_velocity, file):
                     if config_bach.normal:  
                         n=note.Note(int(p))  # create Note object integer to notes object 
                     else:
+                        # create note from A4
                         n=note.Note(p) # exception raise PitchException("Cannot make a step out of '%s'" % usrStr)
-                    #n.storedInstrument = my_instrument  # individual note instrument
+                    
                     n.duration.quarterLength = duration_in_quarter # invididual duration notes, but will be the same for all notes in chords
                     n.volume.velocity = velocity
                     nn.append(n) # all notes object in Chord
 
             except Exception as e:
-                print ('exception chord error %s pi %s note_in_chord %s p %s' %( str(e) , pi, notes_in_chord, p ))
+                print ('MIDI: exception chord error %s pi %s note_in_chord %s p %s' %( str(e) , pi, notes_in_chord, p ))
                 #Cannot make a step out of 'R' R$0.2 ['R$0', '2'] R$0
 
             c = chord.Chord(nn) # create chord object from list of music21 notes objects
@@ -475,15 +519,16 @@ def create_MIDI_file(list_of_pitch, list_of_duration, list_of_velocity, file):
         # pi is a NOTE
         else: # this is note 'C3' or 2
             try: 
-                n = note.Note(pi) # convert string or int to note object, used to create stream
+                # create note with pitch C4 gives n.pitch <music21.pitch.Pitch C4> and n.octave 4. can also see with n.nameWithOctave
+                n = note.Note(pi) # convert string or int to note object, used to create stream. octave is stored
                 n.offset = offset # note offset
-                #n.storedInstrument = my_instrument 
-                n.duration.quarterLength = duration_in_quarter  
+                n.duration.quarterLength = duration_in_quarter   # 0.3 <music21.duration.Duration 3/10>
                 n.volume.velocity = velocity
-                music21_output_list.append(my_instrument)
+                # https://stackoverflow.com/questions/55170188/how-to-make-midi-file-from-notes-with-flute-instrument-in-python-music21-librar
+                music21_output_list.append(my_instrument) # use given instrument
                 music21_output_list.append(n) # append this note
             except Exception as e:
-                print ('Exception note', str(e) , pi)
+                print ('MIDI: Exception note', str(e) , pi)
             
         # Offset is (roughly) the length of time from the start of the piece. 
         # Duration is the time the note is held. 
@@ -498,11 +543,13 @@ def create_MIDI_file(list_of_pitch, list_of_duration, list_of_velocity, file):
 
     # done with seed and all predictions
 
-    pabou.inspect("music21_output_list ", music21_output_list)
-    
+    pabou.inspect("MIDI: music21_output_list ", music21_output_list)
+
+    ########################################################
     # convert list of music21 object to midi file
-    print("convert list of music21 object to MIDI file: ", file)
+    ########################################################
+    print("MIDI: convert list of music21 object to MIDI file: ", file)
     midi_stream = stream.Stream(music21_output_list)
     midi_stream.write('midi', fp = file)
-    print('==== > MIDI file created')
+    print('MIDI: ==== > MIDI file %s created' %file)
     

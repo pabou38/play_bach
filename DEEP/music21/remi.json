@@ -2,5 +2,6 @@
 "user": "bach38",
 "password": "lstm38",
 "remi_port": 5012,
-"flask_port": 5011
+"flask_port": 5011,
+"dns" : "http://192.168.1.61:"
 }

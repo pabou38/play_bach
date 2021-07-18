@@ -1,11 +1,12 @@
 #!/usr/bin/env  python
 
-version = 'May 12'
+version = '1.4'
 
 """
 TO DO
 metadata for model 2
 metadata for input LSTM vs image
+exception pitch  4.7.11 ['4', '7', '11'] Cannot make a name out of ''  
 """
 
 """
@@ -13,21 +14,162 @@ install pyaudio
 sudo apt-get install libasound-dev portaudio19-dev libportaudio2 libportaudiocpp0
 sudo apt-get install ffmpeg libav-tools
 sudo pip install pyaudio 
-"""
- 
-"""
-# dependancies
 install music21 tabulate tqdm
-install selenium
 conda install -c anaconda pydot
 """
 
-import logging
+##################################################################
+# dedicated edgtpu benchmark
+# before importing tensorflow , imported in pabou
+##################################################################
+edge_bench = False
 
+def bench_coral(edge_tpu_file,pick_x_y,nb,model_type,app,h5_size):
+    import pickle
+    #######################################################
+    # Lite benchmark for edge TPU
+    # last boolean indicate coral
+    # tflite file in  models/edge
+    # to run on coral DO NOT import tensorflow
+    # need a pickle file with vectorized X, Y and edgetpu file 
+    # model/app_x_y_test.pick. created after vectorization
+    # edge tpu model file created when saving TFlite models
+    # set edge_bench to True to run. will then exit
+    #######################################################
+    #import tflite_runtime.interpreter as tflite
+    sys.path.insert(1, '..') # this is in above working dir
+    import lite_inference
+
+    print('CORAL: load test X and Y')
+    with open (pick_x_y, 'rb') as fp:
+        (x_test, y_test , x1_test, y1_test, x2_test, y2_test) = pickle.load(fp)
+
+    #my_tflite_model = 'models/edge/mnist_TPU_lite_edgetpu.tflite' 
+    my_tflite_model = edge_tpu_file 
+
+    print('CORAL: doing EDGE benchmark for %s, with %d inferences' %(my_tflite_model,nb))
+    
+    try:
+        # return pretty table row 
+        # use specific module which does not import tensorflow
+        # specific edge interpreter created in bench_lite based on coral boolean
+        # need to pass h5_size
+        b = lite_inference.bench_lite_one_model("TFlite coral", my_tflite_model ,x_test, y_test, x1_test, y1_test, x2_test, y2_test, nb, model_type , app, h5_size, True)
+        pt.add_row(b)
+        print(pt)
+    except Exception as e:
+        print('CORAL: exception in TFlite EDGE benchmark for %s.  %s\n'  %( my_tflite_model, str(e)))
+
+    # call inference directly
+    # create coral interpreter
+    import tflite_runtime.interpreter as tflite
+
+    average_inference_time = 0.0
+    if sys.platform in ["win32"]:
+            delegate = 'edgetpu.dll'
+    if sys.platform in ['linux']:
+        delegate = 'libedgetpu.so.1'
+
+    # model file must be compiled for edgeTPU
+    # cannot use standard lite interpreter module 'tensorflow._api.v2.lite' has no attribute 'load_delegate'
+    interpreter = tflite.Interpreter(model_path = my_tflite_model, experimental_delegates=[tflite.load_delegate(delegate)])
+
+    for i in range(nb):
+        (softmax, _, _, inference_time) = lite_inference.TFlite_single_inference(x_test[i], [], [], interpreter, 1)
+        average_inference_time = average_inference_time + inference_time # in msec, float
+    
+    average_inference_time = average_inference_time / float(nb)
+    print('\nCORAL: average CORAL inference time ms %0.2f for %d inferences' %(average_inference_time,nb))
+
+
+# cannot get context , CLI arguments from pabou, as it imports tensorflow. 
+# hardcode for now
+# edgetpu_compiler   -a to avoid  More than one subgraph is not supported
+
+if edge_bench:
+    import sys,os
+    # must be created by edgetpu_compiler
+    edge_tpu_file = 'models/edge/cello1_nc_so_TPU_lite_edgetpu.tflite'
+    pick_x_y = os.path.join('models', 'cello1_nc_so_x_y_test.pick')
+    nb = 1000
+    model_type = 1
+    app = 'cello1_nc_so_edge'
+    h5_size = 0
+
+    bench_coral(edge_tpu_file,pick_x_y,nb,model_type,app,h5_size) 
+    sys.exit(0)
+
+
+##################################
+# import
+#################################
+
+print('importing ... ', sep=' ')
+import logging
 from tensorflow.python.training.checkpoint_management import _evaluate
 logging.getLogger("tensorflow").setLevel(logging.ERROR)
 
+"""
+0 = all messages are logged (default behavior)
+1 = INFO messages are not printed
+2 = INFO and WARNING messages are not printed
+3 = INFO, WARNING, and ERROR messages are not printed
+"""
+
+import os, sys
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' 
+import tensorflow as tf
+
+#from tensorflow.python.client import device_lib
+
+import numpy as np
+from sklearn.utils import shuffle
+from sklearn.preprocessing import MultiLabelBinarizer, LabelBinarizer # multi hot, one hot
+import sklearn
+import music21
+from music21 import converter, instrument, note, chord, stream
+from music21 import corpus
+#import pdb
+import glob
+import random
+import pickle
+from tabulate import tabulate
+from collections import Counter
+import requests
+import platform
+from tqdm import tqdm # progress bar
+import json
+import time
+import logging
 import datetime
+import _thread # low level threading P3 _t
+import threading # higher-level threading interfaces on top of the lower level _thread module
+import queue # for thread
+from multiprocessing import Process, Queue, cpu_count
+from prettytable import PrettyTable
+
+print('import config file' )
+import config_bach # same dir
+
+print('import model definition')
+import my_model
+
+# pabou.py is one level up
+# insert at 1, 0 is the script path (or '' in REPL)
+sys.path.insert(1, '..') # this is in above working dir
+#print ('sys path used to import modules: %s\n' % sys.path)
+try:
+    print ('importing pabou helper')
+    import pabou # various helpers module, one dir up
+    import lite_inference # single inference and benchmark
+    # pip install prettytable
+    print('pabou helper path: ', pabou.__file__)
+    #print(pabou.__dict__)
+except:
+    print('cannot import pabou')
+    exit(1)
+
+print('all import done')
 
 ###################
 # DONE once
@@ -63,19 +205,14 @@ def parse(corp): # directory
     
     max_du = config_bach.max_duration # cap very long duration , cap number of entries
     
-    print('debug mode ? ', debug)
     print('normal mode ? ', config_bach.normal)
 
     i=0
-    n = config_bach.debug_file_number # number of file to read in debug mode
 
     # source midi defined in config file
     for file in tqdm(glob.glob(corp)): # glob, use shell meta
         #print(file)
         i = i + 1
-        if debug and i > n:
-            print('\ndebug mode; only read a %d file' %(n))
-            break
 
         try:
             if config_bach.chordify: 
@@ -263,14 +400,9 @@ def parse(corp): # directory
                 instruments, parts, 
                 """
 
-            # corpus_notes and corpus_duration updated
-            # both str.  duration are eg '$0.2'
-            # this is ALL notes
-                
     # FOR FILE
-    print ("ALL MIDI file parsed. corpus_notes, corpus_duration, corpus_velocity created. STRINGS\n") 
 
-    ####################  STRINGS created ##################################################################
+    print ("ALL MIDI file parsed. corpus_notes, corpus_duration, corpus_velocity created. STRINGS\n") 
 
     corpus_len = len(corpus_notes)     
     print('pitches in corpus_notes: %d, duration in corpus_duration: %d' %(corpus_len, len(corpus_duration)))
@@ -344,7 +476,6 @@ def parse(corp): # directory
 
     print("create input list and output list for TRAINING. list of seqlen of INTEGERS for X and list of one INTEGER for Y")  
     
-    # corpus and unique are list of str
 
     ####################################################
     # network input and output list. to vectorized later
@@ -520,6 +651,9 @@ array dim (batch, hot size)
 
 when converted to one hot, 1 become hot sizes, for either pitches or pitches$duration
 
+model 3  X   array of seqlen of int (because embedding)
+Y array of one hot
+
 model 2:
 X
  [seqlen of int]  [seqlen of int ]  [seqlen of int ] 1st list is pitches, 2nd list is duration. 3rd velocity . do not convert to one hot. embedding expect integer indexes
@@ -530,7 +664,6 @@ Y
  one hot one hot one hot
  ....
  
-convert to one hot
 """
     
 def vectorize \
@@ -543,7 +676,6 @@ def vectorize \
     
     # input list: integer index. could convert to float (bad) or one hot (better) or left as it for embedding
     # output list: integer, to be one hot encoded
-    
     
     # or do shuffle in fit
     # WARNING: look like training does not work if we not do that
@@ -564,54 +696,67 @@ def vectorize \
     ###################################
     # X list of list of integers index 
     # X pitches, X1 duration, X2 velocity
-    # convert in np array
-    ###################################   
-    X = np.asarray(training_input_list_int_pi)
+    # convert in np array 
+    # input tensor for embedding layer defined as .... default, ie float
+    ################################### 
+    # input data is array like, list, tuples. type infered  
+
+    # model 1. int16 converted to float32 when converted to one hot
+
+    #NOTE !!!!!!!!!!!!!!!!! MAKE SURE the dtype is consistent with model input definition 
+    # or could vertorize after creating model, and cast to model input dtype
+
+    X = np.asarray(training_input_list_int_pi, dtype = 'int32') # int32 by default
+
+    # delete object as soon as not needed to save ram
+    del(training_input_list_int_pi)
+
     # use one hot vs index. index may imply ranking
-    pabou.inspect("INSPECT: X (pitch)", X) 
+    pabou.inspect("INSPECT: X (pitch)", X) # dtype int16 min 0 max 94
 
-    X1 = np.asarray(training_input_list_int_du)
-    pabou.inspect("INSPECT: X1 (duration) ", X1) 
+    X1 = np.asarray(training_input_list_int_du, dtype = 'int32')
+    del(training_input_list_int_du)
+    pabou.inspect("INSPECT: X1 (duration)", X1) 
 
-    X2 = np.asarray(training_input_list_int_ve)
+    X2 = np.asarray(training_input_list_int_ve, dtype = 'int32')
+    del(training_input_list_int_ve)
     pabou.inspect("INSPECT: X2 (velocity)", X2) 
 
     
     #################################################
-    # Y, int to one hot. for both model 1 and model 2
+    # Y, int to one hot. for both model 1, model 2 and model 3
     #################################################   
-    Y = np.asarray(training_output_list_int_pi)  
-    Y = tf.keras.utils.to_categorical(Y) # convert int to one hot    float32
+    Y = np.asarray(training_output_list_int_pi) # int32 by default
+    del(training_output_list_int_pi)  
+    Y = tf.keras.utils.to_categorical(Y) # convert int to one hot    float32 by default
     #num_classes	total number of classes. If None, this would be inferred as the (largest number in y) + 1.
    
     pabou.inspect("INSPECT: Y (one hot)", Y) # nb_sample, nb_unique_notes   float32 min 0 max 1 
     
-    Y1 = np.asarray(training_output_list_int_du)  
+    Y1 = np.asarray(training_output_list_int_du)
+    del(training_output_list_int_du)  
     Y1 = tf.keras.utils.to_categorical(Y1) # convert int to one hot    float32
     pabou.inspect("INSPECT: Y1 (one hot)", Y1)
 
-    Y2 = np.asarray(training_output_list_int_ve)  
+    Y2 = np.asarray(training_output_list_int_ve)
+    del(training_output_list_int_ve)  
     Y2 = tf.keras.utils.to_categorical(Y2) # convert int to one hot    float32
     pabou.inspect("INSPECT: Y2 (one hot)", Y2)
 
 
     ##################### Model 1 ####################################
     # only pitches, ie X and Y are used
-
     if model_type == 1: 
-
-        
-        print('model 1, convert X into one hot')
-        print(X.shape)
-
+        print('model 1, convert X into one hot ', X.shape, X.dtype, X.ndim)
         #########################################################
-        # danger zone . XTF
+        # danger zone . WTF
         # call to inspect freeze with tf 2.4.1
-        # 
         ###########################################################
         # convert X , ie pitch into one hot. integer representation ,  do not used normalize, ie between 0 and 1 as this may imply ranking
-        X = tf.keras.utils.to_categorical(X) # convert int to one hot    float32
-        print(X.shape)
+        
+        # int16 index converted to float hot    (32447, 40) int16 2  TO (32447, 40, 95) float32 
+        X = tf.keras.utils.to_categorical(X)
+        print('model 1, converted X into one hot ', X.shape, X.dtype, X.ndim)
 
         #pabou.inspect("INSPECT: X converted to one hot", X)  # WTF freeze mouse
 
@@ -627,6 +772,26 @@ def vectorize \
         pabou.inspect('INSPECT: X after reshape to batch dimension: ', X)
         """ 
 
+     ##################### Model 3 ####################################
+    if model_type == 3: 
+        pass # already integer, ready for embedding 
+        # vectorized int list to ???? int32, int16 , float32. 
+
+    if model_type == 4: # X (32387, 100) dtype('int32')
+        # normalize X Integer list
+        print('model 4 , normalize X')
+        print('X mean ' , X.mean())
+        print("X std ", X.std())
+
+        config_bach.model4_mean = X.mean()
+        config_bach.model4_std = X.std()
+
+        X = X - X.mean(axis=0)
+        X = X / X.std(axis=0)
+        X = X.astype('float32') # was float64
+        
+        pabou.inspect("INSPECT: X (normalized)", X) 
+        
 
     ##################### Model 2 ####################################
     # X is already integer index. can used in embedding layer
@@ -643,17 +808,21 @@ def vectorize \
 
     # pitches
     x_train, x_val, x_test = np.split(X, [split_val, split_test])
+    del(X)
     y_train, y_val, y_test = np.split(Y, [split_val, split_test])
-
+    del(Y)
 
     # duration
     x1_train, x1_val, x1_test = np.split(X1, [split_val, split_test])
+    del(X1)
     y1_train, y1_val, y1_test = np.split(Y1, [split_val, split_test])
-
+    del(Y1)
 
     # velocity
     x2_train, x2_val, x2_test = np.split(X2, [split_val, split_test])
+    del(X2)
     y2_train, y2_val, y2_test = np.split(Y2, [split_val, split_test])
+    del(Y2)
 
 
     # Double check that our splits add up correctly
@@ -672,16 +841,6 @@ def vectorize \
     pabou.inspect('INSPECT: x_train (pitch): ', x_train)
     pabou.inspect('INSPECT: y_train (pitch): ', y_train)
     """
-    
-    # to make sure
-    print('delete objects')
-    del(training_input_list_int_pi)
-    del(training_output_list_int_pi)
-    del(training_input_list_int_du)
-    del(training_output_list_int_du)
-    del(training_input_list_int_ve)
-    del(training_output_list_int_ve)
-    del(X) ; del(Y); del(X1) ; del (Y1) ; del (X2) ; del (Y2)
 
     print("X and Y Vectorize done for train, val and test, and for picth, duration and velocity\n")
     return (x_train, y_train, x_val, y_val, x_test, y_test, \
@@ -701,7 +860,7 @@ def vectorize \
 number of samples in training set 340k
 340k/1200   340k/6000   280 to 56  upper bound to number of hidden neuron that won't result in over-fitting
 256 LSTM (dense is not hidden)
-    """
+"""
 
 ###############################################################################################################  
 # FIT . 
@@ -712,13 +871,14 @@ number of samples in training set 340k
 
 def fit(model, x_train, y_train, x_val, y_val, x1_train, y1_train, x1_val, y1_val, x2_train, y2_train, x2_val, y2_val, checkpoint_path):
 
-    print('about to FIT model')
+    # x1, y1 : duration. only for model 2
+    # x2, y2 : velocity. only for model 2
 
-    # x1, y1 only used for model 2
+    # x and y : pitch. model 1,3,4
     
     checkpoint_dir = os.path.dirname(checkpoint_path)
-    print ('checkpoint_dir: ', checkpoint_dir)
-    print ('checkpoint_path: ', checkpoint_path) # a file filepath can contain named formatting options, which will be filled the value of epoch and keys in logs (passed in on_epoch_end).
+    print ('FIT: checkpoint_dir: ', checkpoint_dir)
+    print ('FIT: checkpoint_path: ', checkpoint_path) # a file filepath can contain named formatting options, which will be filled the value of epoch and keys in logs (passed in on_epoch_end).
 
 
     """
@@ -742,7 +902,7 @@ def fit(model, x_train, y_train, x_val, y_val, x1_train, y1_train, x1_val, y1_va
     except Exception as e:
         print ('exception removing tensorboard logs file ' + str(e))
     """
-    if config_bach.model_type == 1:
+    if config_bach.model_type in[1,3,4]:
             what_to_monitor = 'val_accuracy'
     if config_bach.model_type == 2:
         what_to_monitor = 'val_pitch_output_accuracy'
@@ -756,7 +916,7 @@ def fit(model, x_train, y_train, x_val, y_val, x1_train, y1_train, x1_val, y1_va
             
             # factor: factor by which the learning rate will be reduced. new_lr = lr * factor
             # min_lr: lower bound on the learning rate.
-            tf.keras.callbacks.ReduceLROnPlateau(monitor=what_to_monitor,factor=0.1,patience=4, min_lr=0.001),
+            tf.keras.callbacks.ReduceLROnPlateau(monitor=what_to_monitor,factor=0.1,patience=8, min_lr=0.001),
             
             # checkpoint dir created if needed
             # can save full model
@@ -785,22 +945,16 @@ def fit(model, x_train, y_train, x_val, y_val, x1_train, y1_train, x1_val, y1_va
     # on windows tensorboard --logdir ./nameofdir
     #TensorBoard 1.13.1 at http://omen:6006  //localhost:6006
 
-    print('callback list: ' , callbacks_list)
-
-    print('Tensorboard log dir: %s. should be the same in Colab' %config_bach.tensorboard_log_dir)
-    
-    # if debug hardcode epochs
-    if config_bach.debug == 1 or parsed_args['debug']:
-        epochs = config_bach.debug_epoch
-        print('fit in debug mode. epochs hardcoded to %d' %(epochs))
+    print('FIT: callback list: ' , callbacks_list)
+    print('FIT: Tensorboard log dir: %s. should be the same in Colab' %config_bach.tensorboard_log_dir)
     
     # if command line, use that
-    elif parsed_args['epochs']:
+    if parsed_args['epochs']:
         epochs = parsed_args['epochs']
-        print('fit in production mode. epochs %d. from command line' %(epochs))
+        print('FIT: fit. epochs %d. from command line' %(epochs))
     else:
         epochs = config_bach.epochs
-        print('fit in production mode. epochs %d. from config file' %(epochs))
+        print('FIT: fit. epochs %d. from config file' %(epochs))
     
 
     #x	Vector, matrix, or array of training data (or list if the model has multiple inputs)
@@ -810,8 +964,8 @@ def fit(model, x_train, y_train, x_val, y_val, x1_train, y1_train, x1_val, y1_va
     # call to KERAS model fit
     ###############################################################################
 
-    if config_bach.model_type == 1:
-        print('\n------------------------  FIT for model 1 ------------------------------------------ ')
+    if config_bach.model_type in [1,3]:
+        print('\n--------------------  FIT for model 1,3.  %d epochs. %s ------------------ '%(epochs,config_bach.app))
         start_time = time.time()   
         # one head
         history = model.fit(x= x_train, y = y_train,\
@@ -819,10 +973,21 @@ def fit(model, x_train, y_train, x_val, y_val, x1_train, y1_train, x1_val, y1_va
              validation_data = (x_val,y_val), shuffle = False, verbose =0)
         elapse = time.time() - start_time
 
+    if config_bach.model_type == 4:
+        print('\n--------------------  FIT for model 4.  %d epochs. %s ------------------ '%(epochs,config_bach.app))
+        # reshape seqlen = size*size into a sizexsize matrix ie (22670, 100) to (22670, 10,10)
+        x_train = np.reshape(x_train, (x_train.shape[0], config_bach.size, config_bach.size))
+        x_val = np.reshape(x_val, (x_val.shape[0], config_bach.size, config_bach.size))
+
+        start_time = time.time()   
+        history = model.fit(x= x_train, y = y_train,\
+             batch_size=config_bach.batch,epochs=epochs, callbacks=callbacks_list, \
+             validation_data = (x_val,y_val), shuffle = False, verbose =0)
+        elapse = time.time() - start_time
 
     if config_bach.model_type == 2:
         # multi head, multi input. 
-        print('\n------------------------  FIT for model 2 ------------------------------------------ ')
+        print('\n------------------------  FIT for model 2. %d epochs. %s ----------------------- ' %(epochs,config_bach.app))
         
         # predict velocity or not . pass 2 or 3 array
         # DEPEND ON how the model was created. it will expect a list of 2 or 3 inputs
@@ -853,15 +1018,15 @@ def fit(model, x_train, y_train, x_val, y_val, x1_train, y1_train, x1_val, y1_va
 
     ########################## KERAS model.fit done ########################################
 
-    print ('fit ended. took: %d sec' %(elapse))
+    print ('FIT: fit ended. took: %d sec' %(elapse))
 
     # epoch could be less because of early stop. also best epoch could be prior last epoch
     actual_epoch = len(history.history['loss'])
     
-    print("model fitted in %d sec for %d configured epochs , and %d actual epochs" % (elapse, epochs, actual_epoch))
-    print('per epoch sec: %0.2f' %(float(elapse/ actual_epoch)))
+    print("FIT: model fitted in %d sec for %d configured epochs , and %d actual epochs" % (elapse, epochs, actual_epoch))
+    print('FIT: per epoch sec: %0.2f' %(float(elapse/ actual_epoch)))
     
-    print('metrics available in history after fit: ' , end = ' ')
+    print('FIT: metrics available in history after fit: ' , end = ' ')
     for key in history.history:
         print(key, end = ', ')
     print('\n')
@@ -871,13 +1036,13 @@ def fit(model, x_train, y_train, x_val, y_val, x1_train, y1_train, x1_val, y1_va
     # latest checkpoint
     try:
         latest = tf.train.latest_checkpoint(checkpoint_dir)
-        print ('latest checkpoint when done fitting:', latest)
+        print ('FIT: latest checkpoint when done fitting:', latest)
     except:
         print('error no latest checkpoint')
     
     # save history in case further processing
     history_dict = history.history # list of successive metrics
-    print('serialize training history to pickle file: ' , history_file)
+    print('FIT: serialize training history to pickle file: ' , history_file)
     with open(history_file, 'wb') as fp:
         pickle.dump(history_dict, fp)
 
@@ -888,31 +1053,35 @@ def fit(model, x_train, y_train, x_val, y_val, x1_train, y1_train, x1_val, y1_va
         print('predict. load training history from: ', history_file) # not used
     """
 
-    print('FIT DONE.. return history\n')
+    print('FIT: DONE.. return history\n')
     return(history)  # saved model done in main
 
 # end of fit  
 
 #####################################
-# predict THREAD.  created by flask handler for /play
+# predict forever THREAD.  created by flask handler for /play
 # get 3 seed str as input parameter
-# predict using model full or tflite
-# use temperature
-# convert prediction to pcm audio sample
-# write pcm audio sample to queue
+#  convert str to int
+#  predict using model full or tflite
+#  use temperature
+#  convert prediction to pcm audio sample
+#  write pcm audio sample to queue
+# rollover str
 #####################################
 stop_predict_thread = False # set to True in calling thread 
+
 def predict_forever_thread(seed_pitch_str, seed_duration_str, seed_velocity_str, queue_samps):
     print('predict forever thread running')
     # corpus is global 
     global stop_predict_thread
+    global lite, model, interpreter
 
     """
         this code used to be inline in flask
         made a thread to parallelize, and make sure flask gets timely audio sample
         loop 'forever' and push predicted audio samples in a queue
         on the other side of the queue, flask thread gets audio sample and yield them
-        can be started as soon as the seed is define, so start prediction and fill queue in parallel of playing seed 
+        can be started as soon as the seed is defined, so start prediction and fill queue in parallel of playing seed 
     """
 
     ################################################
@@ -934,17 +1103,17 @@ def predict_forever_thread(seed_pitch_str, seed_duration_str, seed_velocity_str,
 
     for i in range (config_bach.predict_forever):
 
-        # input_list_*_str are initialized with seed, and rolled over at the end of this loop
-
         # check global variable at each prediction loop. 
         if stop_predict_thread:
-            print('===== > predict forever thread stopping')
+            print('===== > predict forever thread is told to stop')
             stop_predict_thread = False
             sys.exit(0)
 
         # set at any time using GUI
         instrument = my_remi.instrument # to change instrument on the fly
         
+        # input_list_*_str are initialized with seed, and rolled over at the end of this loop
+
         ###########################################################
         # create X,X1,X2 integer lists from input_list_*_str 
         # convert str to int 
@@ -966,56 +1135,52 @@ def predict_forever_thread(seed_pitch_str, seed_duration_str, seed_velocity_str,
             X2.append(v)
 
         # list of int
-
         path_to_tflite_file = os.path.join('models', my_remi.tfmodel, '.tflite')
 
+        # inference timing
+        start_time = time.time()
+
         ############################################
-        # MODEL 1
+        # MODEL 1 or 3
         # vectorize X and convert to one hot and add batch dimension
-        # both for FULL and LITE
+        # cast
+        # predict FULL and LITE
         ############################################
-        if config_bach.model_type == 1:
+        if config_bach.model_type in [1,3,4]:
+    
+            X = np.asarray(X) # array of int
+            # cast to expected input
+            # model return tf type, convert to numpy
+            X = X.astype(model.inputs[0].dtype.as_numpy_dtype)
+            if config_bach == 1:
+                X = tf.keras.utils.to_categorical(X, num_classes=len(pi_to_int)) # array of one hot    float32
+                # add batch dimension. feature dim is one for index encoding , and hot size for one hot
+                X=np.reshape(X, (1 , config_bach.seqlen, len(pi_to_int)))  # shape (xxx,50,dim)
+            else:
+                pass # embedding
 
-            # vectorise input to one hot
-            # X int  X_hot np one hot
-            X_hot = np.asarray(X) # array of int
-            X_hot = tf.keras.utils.to_categorical(X_hot, num_classes=len(pi_to_int)) # array of one hot    float32
-            # add batch dimension. feature dim is one for index encoding , and hot size for one hot
-            X_hot=np.reshape(X_hot, (1 , config_bach.seqlen, len(pi_to_int)))  # shape (xxx,50,dim)
-
-            # timing for ONE inference, FULL or LITE
-            start_time = time.time()
-
-            ############### STREAM PREDICTION with FULL MODEL 1 ###################
-            if my_remi.tfmodel == 'Full':
+            # lite global, set in handler for /play
+            if lite == False: # TFfull
                 # number of input need to be adapted to model, here 1
-                # X_hot np array. one SEQLEN of one hot
-                # tfmodel set dynamically in GUI
-
-                prediction = model.predict(X_hot,verbose=1) 
+                # X np array. one SEQLEN of one hot
+                prediction = model.predict(X,verbose=0)  # verbose 1  1/1 [==============================] - 0s 38ms/step
                 softmax_pi = prediction[0] # prediction[0] is an array of softmax , ie hotsize float32, nothing else in prediction
-
-            else: 
-            ################# predict with TFlite model 1 ####################
-
+            else:  # TFlite
+                ###############################################
+                # !!!!!!!!!!!!!  create lite interpreter
+                ################################################
                 # pass 3 X  to make procedure generic , for model 1, only X is used
                 # unused are []
+                (softmax_pi, softmax_du, softmax_ve, inference_ms) = pabou.TFlite_single_inference(X,[],[], interpreter, config_bach.model_type)
 
-                # softmax , [] if not used
-                (softmax_pi, softmax_du, softmax_ve) = pabou.TFlite_single_inference(X_hot,[],[],path_to_tflite_file, config_bach.model_type)
-
+            # accumulate total inference time
             inference_time = inference_time + time.time() - start_time
-            # timing
-
             nb = nb + 1 # to show inference time from time to time
-            # verbose 1, show inference timing
-            ##############################################
-
-            # modify based on temperature
-            if config_bach.temperature != 0:
-                # modify proba, higher temp, increase surprise.
-                # dynamic temperature using remi
-                softmax_pi = pabou.get_temperature_pred(softmax_pi, my_remi.temperature)
+            
+            
+            # modify proba, higher temp, increase surprise.
+            # dynamic temperature using remi
+            softmax_pi = pabou.get_temperature_pred(softmax_pi, my_remi.temperature)
         
             index = np.argmax(softmax_pi) # just take highest proba in softmax float32 np.sum(prediction) = 1.000001
             target_pi = unique_pi_list[index] # index from softmax converted to str label
@@ -1047,13 +1212,14 @@ def predict_forever_thread(seed_pitch_str, seed_duration_str, seed_velocity_str,
 
             velocity = config_bach.velocity
 
+            ###############################################################################
             # generates samps, ie PCM
             # predicted pitch, duration in quarter is set
-            # velocity is from config file
+            # velocity is from config file (model 1)
             # d2 is from config all the time
+            ###############################################################################
             samps = my_audio.get_audio_sample_from_one_pattern(target_pi, duration_in_quarter, velocity, fluid, instrument, sfid)
             
-
             # ROLLOVER
             # rolling is done on input list str , not X directly , either int list or array 
             if concatenate: 
@@ -1069,39 +1235,38 @@ def predict_forever_thread(seed_pitch_str, seed_duration_str, seed_velocity_str,
         # MODEL 2
         ############################################
 
-        if config_bach.model_type == 2:
-
-            # timing
-            start_time = time.time()
-
-            ################# STREAM PREDICTION FULL MODEL 2 
+        if config_bach.model_type == 2: ################# STREAM PREDICTION FULL MODEL 2 
             if my_remi.tfmodel == 'Full': # predict using FULL model
-                # not sure if input need to be np array or just int list
+                
                 X = np.array(X)
+                X = X.astype(model.inputs[0].dtype.as_numpy_dtype)
                 X1 = np.array(X1)
+                X1 = X1.astype(model.inputs[1].dtype.as_numpy_dtype)
                 X2 = np.array(X2)
+                X2 = X2.astype(model.inputs[2].dtype.as_numpy_dtype)
 
                 if config_bach.predict_velocity:
                     # number of input need to be adapted to model
-                    (softmax_pi, softmax_du, softmax_ve) = model.predict([X,X1,X2],verbose=1)
+                    (softmax_pi, softmax_du, softmax_ve) = model.predict([X,X1,X2],verbose=1) # verbose 1  1/1 [==============================] - 0s 38ms/step
                 else:
-                    (softmax_pi, softmax_du) = model.predict([X,X1],verbose=1)
+                    (softmax_pi, softmax_du) = model.predict([X,X1],verbose=1) # verbose 1  1/1 [==============================] - 0s 38ms/step
 
-            else: 
-            ################# STREAM PREDICTION LITE MODEL 2 
+            else:  ################# STREAM PREDICTION LITE MODEL 2 
 
             # pass all X (int list) to make procedure generic 
             # X are int list.
 
+                ###############################################
+                # !!!!!!!!!!!!!  create lite interpreter
+                ################################################
+
                 if config_bach.predict_velocity:
-                    (softmax_pi, softmax_du, softmax_ve)  = pabou.TFlite_single_inference(X,X1,X2,path_to_tflite_file, config_bach.model_type)
+                    (softmax_pi, softmax_du, softmax_ve, inference_ms)  = pabou.TFlite_single_inference(X,X1,X2,interpreter, config_bach.model_type)
                 else:
-                    (softmax_pi, softmax_du, softmax_ve)  = pabou.TFlite_single_inference(X,X1,[],path_to_tflite_file, config_bach.model_type)
+                    (softmax_pi, softmax_du, softmax_ve, inference_ms)  = pabou.TFlite_single_inference(X,X1,[],interpreter, config_bach.model_type)
 
             inference_time = inference_time + time.time() - start_time # to compute average
-            # timing
             nb = nb + 1
-            # verbose 1, show timing
 
             # array of one array of float32. size = hot_size prediction is a numpy array (1, 32) ndim 2 len 1 
             #print('prediction is a numpy array %s ndim %d len %d ' %(prediction.shape, prediction.ndim,  len(prediction)))
@@ -1114,17 +1279,14 @@ def predict_forever_thread(seed_pitch_str, seed_duration_str, seed_velocity_str,
 
             if config_bach.predict_velocity:
                 prediction_velocity = prediction_velocity[0]
-
             """
 
-            # modify based on temperature
-            if config_bach.temperature != 0:
-                # modify proba, higher temp, increase surprise.
-                # dynamic temperature using remi
-                softmax_pi = pabou.get_temperature_pred(softmax_pi, my_remi.temperature)
-                softmax_du = pabou.get_temperature_pred(softmax_du, my_remi.temperature)
-                if config_bach.predict_velocity:
-                    softmax_ve = pabou.get_temperature_pred(softmax_ve, my_remi.temperature)
+            # modify proba, higher temp, increase surprise.
+            # dynamic temperature using remi
+            softmax_pi = pabou.get_temperature_pred(softmax_pi, my_remi.temperature)
+            softmax_du = pabou.get_temperature_pred(softmax_du, my_remi.temperature)
+            if config_bach.predict_velocity:
+                softmax_ve = pabou.get_temperature_pred(softmax_ve, my_remi.temperature)
 
             # convert softmax to predicted 
 
@@ -1146,10 +1308,11 @@ def predict_forever_thread(seed_pitch_str, seed_duration_str, seed_velocity_str,
                 target_ve = None
             # integer or None
                                 
-            
+            #############################################################################
             # generate samps 
             # d2 is from config all the time
             # pass target_pi(str), duration in quarter(float), target_ve (int or None)
+            #############################################################################
             samps = my_audio.get_audio_sample_from_one_pattern(target_pi, duration_in_quarter, target_ve, fluid, instrument, sfid)
             
             # roll over is done on input list str, not X directly (messy)
@@ -1162,21 +1325,20 @@ def predict_forever_thread(seed_pitch_str, seed_duration_str, seed_velocity_str,
             if config_bach.predict_velocity:
                 input_list_velocity_str.append(target_ve)
                 input_list_velocity_str = input_list_velocity_str[1:]
-            
         # end model 2
         
         # write audio sample to queue (vs just yielding if not in a separate thread
         # will play in browser
         queue_samps.put(samps, block=True)
-        print('p', end = ' ')
+        #print('p', end = ' ')
 
         # print average inference time every n 
         if nb % 100 == 0:
             average = 1000.0 * inference_time / float(nb)
-            print('%s average real time inference time ms: %0.2f ' % (my_remi.tfmodel, average))
+            print('%s average inference time so far ms: %0.2f ' % (my_remi.tfmodel, average))
 
     # for forever
-    print('end of streaming')
+    print('end of predict forever thread')
     
 # end of predict forever thread
 
@@ -1192,6 +1354,18 @@ from flask import Flask, request , render_template, make_response, Response
 #import flask_monitoringdashboard as dashboard # only if not colab
 
 server=Flask(__name__)  # create server before defining route 
+
+#############################
+## test. simple static text string
+#############################
+@server.route("/", methods=['POST', 'GET'])
+def handler_root():
+        print ("\nflask handler for /")
+        logging.info(str(datetime.datetime.now())+ ' Flask: /' )
+        resp = "use /ping, /audio or /play"
+        r=make_response(resp)
+        r.headers['Content-Type'] = 'text/plain'
+        return (r) 
 
 #############################
 ## test. simple static text string
@@ -1246,6 +1420,8 @@ def handler_play():
      
     global stop_predict_thread
     global model
+    global t
+    global lite
 
     # from pickle, corpus, unique and to_int needed in predict thread
 
@@ -1255,27 +1431,50 @@ def handler_play():
           corpus_notes, corpus_duration, corpus_velocity, \
             unique_pi_list, pi_to_int, unique_du_list, du_to_int, unique_ve_list, ve_to_int
     
-    # set in GUI to switch corpus
-    # load model
+    ###############################################
+    # load new h5 model and new corpus.pick if not the current one
+    # based on variable set in GUI
+    ###############################################
+
+    #######################################################
+    # stop any predict thread that may be already running.
+    ########################################################
+    
+    try:
+        if t.is_alive(): # exception is normal (t not defined) if thread not already started
+            stop_predict_thread = True # tested by predict thread
+            print ('asking predict thread to stop, as corpus has changed')
+            t.join(5.0)  # wait until it stops
+            print ('join predict thread has stopped') # but still some audio in browser pipeline. 
+    except Exception as e:
+        print('Exception predict thread is alive ', str(e))
+
+    stop_predict_thread = False # so that the next one will run
+
+    ###############################################
+    # load new model and new corpus.pick if not the current one
+    # can be Full or Lite model
+    # based on variable set in GUI
+    # set global variable lite
+    ###############################################
     if my_remi.load_new_corpus : # set by GUI if corpus actually changed
+        print('changed corpus to: %s. need to load new corpus pick file and  model' %my_remi.corpus)
 
-        print('change corpus to: %s' %my_remi.corpus)
-        my_remi.load_new_corpus = False
+        # interpreter, model and lite are available in predict thread
+        
+        # check if new corpus is full or lite
+        if my_remi.corpus.split('_')[-1] == 'lite':
+            interpreteur = pabou.load_model(my_remi.corpus ,'h5', None, None) 
+            print('this is a TFLite model')
+            lite = True
+        else:
+            model = pabou.load_model(my_remi.corpus ,'li', None, checkpoint_path) 
+            print('this is a h5 Full model')
+            lite = False
 
-        print ('set flag to stop predict thread, as corpus has changed')
-        stop_predict_thread = True # stop any running predict thread. not sure if needed
-
-        # new corpus name set by remi GUI
-        print('load new h5 model, as defined with gui ', my_remi.corpus)
-        # corpus name is app. library creates actual file path
-        model = pabou.load_model(my_remi.corpus ,'h5', None, checkpoint_path)
-
-        ######################
-        # ????????
+        # load corpus as well. needed for seed, dictionaries etc ..
         x = my_remi.corpus + '_' + config_bach.pick
         pick = os.path.join(path, x)
-
-        print("load corpus from saved pickle file: " , pick)
         with open(pick, "rb") as fp:
 
             (training_input_list_int_pi, training_output_list_int_pi, \
@@ -1286,30 +1485,37 @@ def handler_play():
             unique_du_list, du_to_int, \
             unique_ve_list, ve_to_int, \
             ) = pickle.load(fp)
+        print("loaded new corpus from saved pickle file: " , pick)
 
 
         # use last char of corpus to encode model 1 or 2
-        print('update model type: ' , end = ' ')
-
+        print('loaded model type: ' , end = ' ')
         if my_remi.corpus[-1] == '2':
             config_bach.model_type = 2 # needed for X for inference
-            print ('new model 2')
+            print ('2')
         else:
             config_bach.model_type = 1
-            print ('new model 1')
+            print ('1')
     # new corpus
     else:
-        print('using current corpus: ' , my_remi.corpus)
-    
+        print('/play start with existing model and corpus: ' , my_remi.corpus)
 
+    my_remi.load_new_corpus = False # 
+
+
+    #########################
+    # create seed , play header and seed
+    # start predict forever thread
+    # while TRUE get audio sample from queue and yield to browser
+    #########################
+    
     def play():
-        print('start to stream using %s\n' %my_remi.instrument)
+        print('\nstart to stream using: %s\n' %my_remi.instrument)
         logging.info(str(datetime.datetime.now())+ ' starting to stream' )
+        global t
 
         # queue already created
-        ######################################################
-        ## seed
-        # get a ramdom list of pattern from corpus . could start at measure
+        # SEED. get a ramdom list of pattern from corpus . could start at measure
         start = random.randint(0,len(corpus_notes)-config_bach.seqlen)
         
         print ('seed starts at random %d within %d' %(start, len(corpus_notes)))
@@ -1319,9 +1525,9 @@ def handler_play():
         seed_duration = corpus_duration[start:start+config_bach.seqlen] 
         seed_velocity = corpus_velocity[start:start+config_bach.seqlen] 
 
-        print('seed pitch: ', seed_pitch, len(seed_pitch), type(seed_pitch[0]))
-        print('seed duration: ', seed_pitch, len(seed_duration), type(seed_duration[0]))
-        print('seed velocity: ', seed_velocity, len(seed_velocity), type(seed_velocity[0]))
+        #print('seed pitch: ', seed_pitch, len(seed_pitch), type(seed_pitch[0]))
+        #print('seed duration: ', seed_pitch, len(seed_duration), type(seed_duration[0]))
+        #print('seed velocity: ', seed_velocity, len(seed_velocity), type(seed_velocity[0]))
 
         # play (yield) single a4 and wave header
         
@@ -1332,7 +1538,7 @@ def handler_play():
         # send header and one first note , just for fun
         samps = wav_header + my_audio.get_audio_sample_from_one_note(fluid, 'a4', config_bach.d1, config_bach.d2,my_remi.instrument, sfid)
         yield(samps)
-        time.sleep(2)
+        time.sleep(1)
 
         
         # play (yield) all notes in seed 
@@ -1374,16 +1580,23 @@ def handler_play():
             
         # seed music have been yielded to brower
         print('all seed music have been yieled to browser')
-        
-        # start predict thread
-        # predict thread will generate audio sample from prediction and write to queue
+
+        ###################################
+        # start predict forever thread
+        # use HL threading
+        ###################################
+        # predict thread will generate audio sample from running inferences and write to queue
         # for some reason, starting the thread before yielding the seed create blocage. 
         # a lot of pg pg , but sometime ppppp gggg pp gg
 
-        # start predict forever thread as soon as possible. will start filling the queue while playing seed
+        # start predict forever thread as soon as possible. will start filling the queue while playing seed 
+        # us e HL threading instead of low level thread
+        # 
         try:
-            _thread.start_new_thread(predict_forever_thread, (seed_pitch, seed_duration, seed_velocity, queue_samps) ) # need tuple
-            print('predict thread started')
+            #_thread.start_new_thread(predict_forever_thread, (seed_pitch, seed_duration, seed_velocity, queue_samps) ) # need tuple
+            t = threading.Thread(target=predict_forever_thread, args=(seed_pitch, seed_duration, seed_velocity, queue_samps))
+            t.start()
+            print('start predict thread. Alive ? ' , t.is_alive())
             logging.info(str(datetime.datetime.now())+ ' starting predict forever thread' )
             
         except Exception as e:
@@ -1397,11 +1610,13 @@ def handler_play():
         # send (yield) audio sample to browser
         ################################################
 
+        print('keep getting audio sample from queue, until /play is invoqued again')
         while (True):
             samps = queue_samps.get(block=True) # get prediction
-            print('g', end = ' ')
+            #print('g', end = ' ')
             yield(samps) # play to browser
             time.sleep(0.001)
+        print('!!!!!!!!!!!!!!!! should never get there')
     # def play():
 
     return Response(play(), mimetype='audio/x-wav')
@@ -1414,59 +1629,7 @@ def handler_play():
 #############################################################################
 #############################################################################
 
-print('\n\n====================== Play Bach %s ==========================\n\n' %version)
-
-print('importing ... ', sep=' ')
-import os, sys
-import tensorflow as tf
-
-#from tensorflow.python.client import device_lib
-import numpy as np
-from sklearn.utils import shuffle
-from sklearn.preprocessing import MultiLabelBinarizer, LabelBinarizer # multi hot, one hot
-#import sklearn
-#import music21
-from music21 import converter, instrument, note, chord, stream
-from music21 import corpus
-#import pdb
-import glob
-import random
-import pickle
-from tabulate import tabulate
-from collections import Counter
-import requests
-import platform
-from tqdm import tqdm # progress bar
-import json
-import time
-import logging
-import datetime
-import _thread # low level threading P3 _t
-import queue # for thread
-from multiprocessing import Process, Queue, cpu_count
-from prettytable import PrettyTable
-
-print('import config file' )
-import config_bach # same dir
-
-print('import model definition')
-import my_model
-
-# pabou.py is one level up
-# insert at 1, 0 is the script path (or '' in REPL)
-sys.path.insert(1, '..') # this is in above working dir
-#print ('sys path used to import modules: %s\n' % sys.path)
-try:
-    print ('importing pabou helper')
-    import pabou # various helpers module, one dir up
-    # pip install prettytable
-    print('pabou helper path: ', pabou.__file__)
-    #print(pabou.__dict__)
-except:
-    print('cannot import pabou')
-    exit(1)
-
-print('all import done')
+print('\n\n====================== Play Bach %s. %s ==========================\n\n' %(version, config_bach.app))
 
 print('corpus: ', config_bach.app)
 print('model type: ', config_bach.model_type)
@@ -1479,13 +1642,6 @@ print('file system encoding', sys.getfilesystemencoding())
 print('model type (hot, heads..) %d' %(config_bach.model_type))
 parsed_args = pabou.parse_arg(config_bach.model_type) # return namespace converted to dict
 
-# to be deprecated.
-if config_bach.debug == 1 or parsed_args['debug']:
-    debug = True
-    print('!!!!! WARNING !!!!!! running in debug mode. small corpus %d, few epochs %d' %(config_bach.debug_file, config_bach.debug_epoch))
-else:
-    debug = False
-    print('NOT running in debug mode')
 
 """
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' # TF logging. disable AUTOGRAPH warning when saving as SavedModel 
@@ -1586,18 +1742,16 @@ history_file = os.path.join(path, x)
 x = config_bach.app + '_' +  config_bach.training_file
 training_file = os.path.join(path, x)
 
-x = config_bach.app + '_' + config_bach.midi_file
+x = config_bach.app + config_bach.midi_file
 midi_file = os.path.join(path, x)
 
-x = config_bach.app + '_' + 'labels.txt' # hardcoded. needed in pabou.py to save tflite metadada. avoid importing config to keep generic
+x = config_bach.app + pabou.label_txt 
 label_file = os.path.join(path, x)
 
-"""
-debug mode will save a specialize pick file
-if debug and os.path.isfile(pick):
-    print('debug mode. remove any existing corpus pick file: %s ' %(pick))
-    os.remove(pick)
-"""
+# test set already vectorized. needed for edgetpu benchmark
+x = config_bach.app + '_' + config_bach.pick_x_y
+pick_x_y = os.path.join(path, x)
+
 
 ###########################################
 # LOAD parsed corpus from PICKLE, if pickle file exists . 
@@ -1619,7 +1773,6 @@ if os.path.isfile(pick):
         unique_ve_list, ve_to_int, \
         ) = pickle.load(fp)
 
-    
 else:
     ######################
     # no pickle
@@ -1647,10 +1800,6 @@ else:
     {'A2': 0, 'A2.F#3': 1, 'A2.F3': 2, 'A3': 3, 'A3.B3': 4, 'A3.F#3': 5, 'A4': 6, 'A4.G#4': 7, 'B-2': 8, 'B-2.E3': 9, 'B-2.G#3': 10, 'B-2.G3': 11, 'B-3': 12, 'B-3.D3': 13, ...}
     """
 
-    # save corpus in pickle
-    if debug:
-        pick = pick + '_debug'
-
     # save pickle
     with open(pick, "wb") as fp:
         print('save corpus in pickle: ', pick)
@@ -1664,31 +1813,49 @@ else:
         unique_du_list, du_to_int, \
         unique_ve_list, ve_to_int, \
         ) , fp)
+
+
         
-   
-    # tflite labels
-    d_pi = {}
-    d_du = {}
-    d_ve = {}
+###################################
+# labels for tflite models metadata
+###################################
+d_pi = {}
+d_du = {}
+d_ve = {}
 
-    for i , pi in enumerate(unique_pi_list):
-            d_pi[i] = pi
+for i , pi in enumerate(unique_pi_list):
+        d_pi[i] = pi
 
-    for i , du in enumerate(unique_du_list):
-            d_du[i] = du
+for i , du in enumerate(unique_du_list):
+        d_du[i] = du
 
-    for i , ve in enumerate(unique_ve_list):
-            d_ve[i] = ve
+for i , ve in enumerate(unique_ve_list):
+        d_ve[i] = ve
 
-    l = [d_pi, d_du, d_ve]
+l = [d_pi, d_du, d_ve]
 
-    with open(label_file, "w") as fp:   # if wb need bytes , if w need str write() argument must be str, not list
-        fp.write(str(l))
-    print('label for metadata', l) 
-    #  [{0: 'A2', 1: 'A2.F#3', 2: 'A2.F3', , 127: 'G5', 128: 'R'}, {0: '$0.0',
-    #  38: '$7.7', 39: '$7.8', 40: '$8.0'}, {0: 0, 1: 1, 2: 70, 3: 85, 4: 100}]
-    
-print('parse done. pickle created or loaded . corpus, training integer list and dictionary available')
+with open(label_file, "w") as fp:   # if wb need bytes , if w need str write() argument must be str, not list
+    fp.write(str(l))
+print('label for metadata', l) 
+#  [{0: 'A2', 1: 'A2.F#3', 2: 'A2.F3', , 127: 'G5', 128: 'R'}, {0: '$0.0',
+#  38: '$7.7', 39: '$7.8', 40: '$8.0'}, {0: 0, 1: 1, 2: 70, 3: 85, 4: 100}]
+
+############################################################
+# create corpus and dictionary .cc file, for microcontroler
+############################################################
+print('create cc corpus file for microcontroler')
+corpus_int = [] # convert corpus from str to int
+for x in corpus_notes:
+    corpus_int.append(pi_to_int[x])  # convert str to int
+
+# create C array SOURCE file. meant to be compiled 
+# .h file, containing actual variable definition (not only declaration)
+# include .h file in C source. no need for any .cpp file
+pabou.create_corpus_cc(config_bach.app, corpus_int)
+pabou.create_dict_cc(config_bach.app, unique_pi_list)
+
+print('parse done. pickle created or loaded. corpus, training integer list and dictionary available')
+print('created .h file for micro')
 
 
 ###################################################
@@ -1769,6 +1936,12 @@ training_input_list_int_ve, training_output_list_int_ve,\
 config_bach.model_type )
 print('vectorized done. train, val, test, x,y, 1,2,3 created')
 
+# coral benchmark runs standalone, so get a ready vectorized test set
+with open (pick_x_y, 'wb') as fp:
+    print('create pickle %s with X test and Y test. for coral benchmark' %pick_x_y)
+    pickle.dump((x_test, y_test , x1_test, y1_test, x2_test, y2_test),fp)
+
+
 ############# create or load Model ##########################
 # if l=1 load existing h5 model (could tf, h5 or checkpoints). can be used to resume training
 # if l=0 force create new model from parsed corpus
@@ -1796,7 +1969,7 @@ if parsed_args['load_model'] == 1: # INTEGER.     load saved model. used in prod
         sys.exit(1)
 
     # evaluate model.   vectorization already done, so x_test is defined
-    if config_bach.model_type == 1:
+    if config_bach.model_type in [1,3]:
         x= x_test
         y = y_test
 
@@ -1807,6 +1980,10 @@ if parsed_args['load_model'] == 1: # INTEGER.     load saved model. used in prod
     if config_bach.model_type == 2 and config_bach.predict_velocity == False:
         x = [x_test, x1_test]
         y = [y_test, y1_test]
+
+    if config_bach.model_type in [4]: # (3239, 100) to (3239, 10, 10)
+        x = np.reshape(x_test,(x_test.shape[0],config_bach.size, config_bach.size)) # keep batch dim, split 36 in 6x6
+        y = y_test
 
     # evaluate model just loaded from disk. good info
     (test_pitch_accuracy, test_duration_accuracy, test_velocity_accuracy ) = pabou.model_evaluate(model, config_bach.model_type, x , y)
@@ -1832,36 +2009,35 @@ else:
     
     #########################################################################################
     # CREATE new MODEL 
-    # could be model 1 (1 head), or model 2 (2 or 3 heads)
+    # could be model 1 (1 head), or model 2 (2 or 3 heads) or model 3
     ##########################################################################################
-    print('create model. model_type (number of heads ..): %s' %  (config_bach.model_type))
-
-    """
-    model file name
-    model 1  
-        concatenate     cello1
-        no concatenate  nccello1
-
-    model 2
-        velocity        cello2
-        no velocity     nvcello2            
-    """
+    print('create model. model_type: %s' %  (config_bach.model_type))
 
     # single output head
     if config_bach.model_type == 1:
         # hot_size is size of last dense 
         (model, nb_params) = my_model.create_model_1(hot_size_pi, plot_file)
 
+    elif config_bach.model_type == 3:
+        # hot_size is size of last dense 
+        # last boolean is True for smaller models for microcontrollers
+        (model, nb_params) = my_model.create_model_3(hot_size_pi, plot_file, False)
+
+    elif config_bach.model_type == 4:
+        # hot_size is size of last dense 
+        (model, nb_params) = my_model.create_model_4(hot_size_pi, plot_file)
+
     # multi heads
-    if config_bach.model_type == 2:
+    elif config_bach.model_type == 2:
         if config_bach.predict_velocity:
             # with velocity
             (model, nb_params) = my_model.create_model_2(hot_size_pi, hot_size_du, hot_size_ve, plot_file)
         else:
             # no velocity
             (model, nb_params) = my_model.create_model_2_nv(hot_size_pi, hot_size_du, plot_file)
-
-    print('model params Mb %0.2f' % float(nb_params/(1024*1024)),2)
+    else:
+        print('model type %d not supported' %config_bach.model_type)
+        
    
 
 # created or loaded model
@@ -1887,15 +2063,6 @@ else:
     hot_size_ve = y2_train.shape[1]
     print('hot size velocity, ie size of softmax is: ' , hot_size_ve)
     
-    print('delete integer list. spare memory') # fit fills 8G on omen
-    del (training_input_list_int_pi)
-    del (training_output_list_int_pi)
-    del (training_input_list_int_du)
-    del (training_output_list_int_du)
-    del (training_input_list_int_ve)
-    del (training_output_list_int_ve)
-
-    
     ###############################
     # MODEL FIT 
     ###############################
@@ -1918,16 +2085,21 @@ else:
     #####################################################################
         
     print('Save FULL model in various format (tf, h5, weigths from checkpoint, json)')
-    # save is done using config bach; not remi. to create all possible corpus. anyway remi not running yet
+    # save is done using app as in config bach
+
     (tf_dir, h5_file, h5_size) = pabou.save_full_model(config_bach.app, model, checkpoint_path)
     
     
     ###################################################
-    # MODEL evaluate 
+    # MODEL evaluate on test data
     ####################################################
     
-    if config_bach.model_type == 1:
+    if config_bach.model_type in [1,3]:
         x = x_test
+        y = y_test
+
+    if config_bach.model_type in [4]: # (3239, 100) to (3239, 10, 10)
+        x = np.reshape(x_test,(x_test.shape[0],config_bach.size, config_bach.size)) # keep batch dim, split 36 in 6x6
         y = y_test
 
     if config_bach.model_type == 2 and config_bach.predict_velocity:
@@ -1957,8 +2129,10 @@ else:
 
 #############################
 # MIDI file creation
+# only using Full Model
+# TFlite model only used for streaming
 #############################
-if parsed_args['predict'] == True:
+if parsed_args['predict_midi'] == True:
     import my_midi
     print('run prediction ON FULL MODEL to create MIDI files')
     
@@ -1982,12 +2156,12 @@ if parsed_args['predict'] == True:
     print ("create output midi file %s from predicted list of strings" %(midi_file))
     my_midi.create_MIDI_file(list_of_predicted_pitch, list_of_predicted_duration, list_of_predicted_velocity, midi_file)
 else:
-    print('do not predict and create MIDI file')
+    print('NO PREDICTION AND MIDI FILE CREATION')
 
 
 ####################################################################
 # MODEL CONVERT in TFlite format
-# name of save file are in PABOU , both full and tflite
+# name of model file are defined in PABOU , both full and tflite
 #####################################################################
 if parsed_args['savelite'] == True: # default false
 
@@ -2007,9 +2181,12 @@ if parsed_args['savelite'] == True: # default false
 
     if float(tf.__version__[:3]) >= 2.3:
         # need tf 2.3 for RNN but tf2.3 does not work on compute capability 5, ie my omen. so move totf2.4 
-        print('convert to TFlite using PABOU. ALL quantization. From keras model, or h5 or SavedModel.')  
+        print('\n\nconvert to TFlite. ALL quantization. From keras model, or h5 or SavedModel.') 
+
+
+        # prepare representative dataset. use test set 
         
-        if config_bach.model_type == 1:
+        if config_bach.model_type in [1,3,4]:
             x = x_test
         if config_bach.model_type == 2 and config_bach.predict_velocity == True:
             x = [x_test, x1_test, x2_test]
@@ -2017,21 +2194,22 @@ if parsed_args['savelite'] == True: # default false
             x = [x_test, x1_test]
         
         try:
-            # order is defined in save_all_tflite_models
-            pabou.save_all_tflite_models(config_bach.app, x, config_bach.model_type, hot_size_pi) 
+            pabou.save_all_tflite_models(config_bach.app, x, config_bach.model_type, hot_size_pi, model) 
 
             # x is for representative dataset gen. uses test set. input as numpy array
             # will generate various quantization
             # metadata only implemented for type 1 for now 
-            # hot size is for metadata. 
+            # hot size is for metadata only. size of output softmax
+            # model to get input structure 
             
         except Exception as e:
             print('Exception saving TFlite: ', str(e))
+            sys.exit(1)
     else:
         print ('tf version %s. cannot save to TFlite for the RNN models with tf < 2.3' %tf.__version__)
 
 else:
-    print('no TFlite models creation')
+    print('NO TFLITE MODEL CONVERSION')
     
 
 #########################################################################
@@ -2042,7 +2220,6 @@ if parsed_args['benchmark_full'] == True: # default false
     print('doing benchmark for full model on %d inference' %(nb))
     
     # use the instanciated keras model
-
     """
     # load model from file
     print ('load TF full model from %s for inferences' %(full_model_SavedModel_dir))
@@ -2052,13 +2229,11 @@ if parsed_args['benchmark_full'] == True: # default false
     model = pabou.load_model('mnist_','h5', None, None)
     """
 
-    # depand on model type    
-    # h5_size is set in fit, so error if we do not fit, but loaded a model
-
+    # h5_size is set in fit, so not set if we do not fit, but loaded a model
     h5_size = pabou.get_h5_size(config_bach.app)
 
-    if config_bach.model_type == 1:
-        pabou.bench_full("FULL model1", model, x_test, y_test, [], [], [], [] , nb, h5_size , config_bach.model_type)
+    if config_bach.model_type in [1,3,4]:
+        pabou.bench_full("FULL model", model, x_test, y_test, [], [], [], [] , nb, h5_size , config_bach.model_type)
     else:
         if config_bach.predict_velocity:
             pabou.bench_full("FULL model2 with velocity", model, x_test, y_test, x1_test, y1_test, x2_test, y2_test, nb, h5_size, config_bach.model_type )
@@ -2066,7 +2241,7 @@ if parsed_args['benchmark_full'] == True: # default false
             pabou.bench_full("FULL model2 without velocity", model, x_test, y_test, x1_test, y1_test, [], [], nb, h5_size , config_bach.model_type)
 
 else:
-    print('no benchmark on FULL model')
+    print('NO BENCHMARK ON FULL MODEL')
 
 
 ###############################################
@@ -2075,46 +2250,37 @@ else:
 ###############################################
 if parsed_args['benchmark_lite'] == True: # default false
     nb = 100
-    print('doing benchmark for Lite model on %d inference' %(nb))
-    # create table
+    h5_size = pabou.get_h5_size(config_bach.app)
+    print('doing benchmark for all TFLite models with %d inference' %(nb))
+ 
     pt = PrettyTable()
     pt.field_names = ["model", "iters", "infer (ms)",  "acc pi", "acc du", "acc ve",  "h5 size", 'TFlite size']
 
-    # file name without model and app
-
-    """
-    for x in [pabou.tflite_int_only_file,pabou.tflite_fp32_file, pabou.tflite_default_file, pabou.tflite_default_representative_file, \
-        pabou.tflite_int_fp_fallback_file, pabou.tflite_FP16_file, pabou.tflite_16by8_file]:
-    """
-    for x in [pabou.tflite_fp32_file, pabou.tflite_default_file, pabou.tflite_FP16_file, pabou.tflite_16by8_file, \
-        pabou.tflite_int_only,  pabou.tflite_default_representative_file, pabou.tflite_int_fp_fallback_file \
-        
-        ]:
-
-        # error int only, default representative, int fall back
-
-        # create full path for resulting TFlite file
-        x = config_bach.app + '_' +  x
+    for x in pabou.all_tflite_file:
+        # create full path for TFlite file
+        # append _fp32_lite.tflite
+        x = config_bach.app +  x
         tflite_file = os.path.join('models', x)
         print('doing TFlite benchmark for: ', tflite_file)
+
+        # False means do not use Coral run time, but tensorflow run time
         
         try:
-        
-            if config_bach.model_type == 1:
-                b= pabou.bench_lite_one_model("TFlite model 1: ", tflite_file ,x_test, y_test, [], [], [], [], nb,  config_bach.model_type, config_bach.app)
+            if config_bach.model_type in [1,3,4]:
+                b= lite_inference.bench_lite_one_model("TFlite model 1,3,4: ", tflite_file ,x_test, y_test, [], [], [], [], nb,  config_bach.model_type, config_bach.app, h5_size, False)
             else:
                 if config_bach.predict_velocity:
-                    b= pabou.bench_lite_one_model("TFlite model 2, velocity: ", tflite_file ,x_test, y_test, x1_test, y1_test, x2_test, y2_test, nb,  config_bach.model_type, config_bach.app)
+                    b= lite_inference.bench_lite_one_model("TFlite model 2, velocity: ", tflite_file ,x_test, y_test, x1_test, y1_test, x2_test, y2_test, nb,  config_bach.model_type, config_bach.app, h5_size, False)
                 else:
-                    b= pabou.bench_lite_one_model("TFlite model 2, no velocity: ", tflite_file ,x_test, y_test, x1_test, y1_test, [], [],  nb, config_bach.model_type, config_bach.app)
-            pt.add_row(b)
+                    b= lite_inference.bench_lite_one_model("TFlite model 2, no velocity: ", tflite_file ,x_test, y_test, x1_test, y1_test, [], [],  nb, config_bach.model_type, config_bach.app, h5_size, False)
+           
+            pt.add_row(b) # 
         except Exception as e:
-            print('exception TFlite benchmmark %s %s' %(str(e), tflite_file))
+            print('exception TFlite benchmark %s. model file: %s' %(str(e), tflite_file))
+
     print(pt)
-
 else:
-    print('no benchmark on Lite models')
-
+    print('NO BENCHMARK ON LITE MODELS')
 
 #################################################################################
 #################################################################################
@@ -2131,10 +2297,8 @@ if parsed_args['stream'] == False:
     print('stream not configured. exit')
     sys.exit(0)
 
-import pyaudio
-import fluidsynth
-
-print('import audio')
+print('import my audio')
+# pyaudio and fluidsynth imported in my_audio
 import my_audio
     
 print('import remi gui' , end = '. ')
@@ -2165,7 +2329,7 @@ except Exception as e:
 
 with open('remi.json' ,'r') as fp:
 	data = json.load(fp)
-print(data)
+print('remi json file: ',data)
 
 flask_port = (data['flask_port'])
 remi_port = (data['remi_port'])
@@ -2195,8 +2359,6 @@ https://medium.com/better-programming/how-to-use-flask-wtforms-faab71d5a034
 https://medium.com/flask-monitoringdashboard-turtorial/monitor-your-flask-web-application-automatically-with-flask-monitoring-dashboard-d8990676ce83
 """
 
-server=Flask(__name__)  # create server before defining route 
-
 # Flask dashboard
 print('start flask dashboard. connect to /dashboard to get statistics')
 dashboard.config.init_from(file=config_bach.dashboard_config)
@@ -2207,8 +2369,8 @@ queue_samps= queue.Queue(maxsize=10) # main predict and write. flask hander read
 
 print ("\n==== starting flask server in main on port: " , flask_port) 
 logging.info(str(datetime.datetime.now())+ ' starting flask on port %d' % flask_port )
-# 0.0.0.0 seen from outside local host
 
+# 0.0.0.0 seen from outside local host
 try:
     server.run(host="0.0.0.0", port=flask_port, debug=False)
 except Exception as e:

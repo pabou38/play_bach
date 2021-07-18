@@ -8,14 +8,6 @@ from music21 import instrument
 import os
 
 ###########################################
-# debug mode (not used, just crank down epoch)
-###########################################
-debug=False # True = load small corpus, few epochs. also configurable with command line -d
-# !!! to use a small corpus, need to parse MIDI file. so delete pick file first
-debug_epoch = 5
-debug_file_number = 5 # number file to read
-
-###########################################
 # file names
 ###########################################
 bach_files = os.path.join('training' , '*.mid') # all midi files to use for training
@@ -25,7 +17,8 @@ plot_file = "model_plot.png"
 training_file = "training_result.png"
 history_file = 'history.pick'
 
-midi_file = "generated.mid"  # will be prefixed with model name
+midi_file = ".mid"  # will be prefixed with model name
+pick_x_y = "x_y_test.pick"
 
 tensorboard_log_dir = 'tensorboard_log_dir'
 log_file = 'log_play_bach.log' # for flask inference
@@ -34,9 +27,9 @@ dashboard_config = 'dashboard.conf'
 ###########################################
 # corpus parsing
 ###########################################
-concatenate = False # only for model 1. True to have duration encoded as pitch$duration. need to delete corpus.pick.  True generates larger corpus
+concatenate = False # only for model 1 and 3. True to have duration encoded as pitch$duration. need to delete corpus.pick.  True generates larger corpus
 predict_velocity = True # only for model 2. if true 3 heads, else 2 heads
-normal = False  # True use normal order 1.2 for chords, ie forget octave (default octave 4) or False uses eg F5.A4.D5.D4.D3. False generates larger corpus
+normal = True  # True use normal order 1.2 for chords, ie forget octave (default octave 4) or False uses eg F5.A4.D5.D4.D3. False generates larger corpus
 
 max_duration = 8.0  # cap duration to reduce corpus size when concatenating
 low_occurence = 5 # not used yet
@@ -49,41 +42,44 @@ chordify = False # True: all notes in differents parts converted to chords in si
 # upper bound on number of hidden cells = number of samples / alpha *(number of input neurons + number of output neurons)
 # alpha from 2 to 10, def 5?
 
-seqlen=40 # length of input sequence
-epochs=70 # max number. training will stop earlier if accuracy not improving. can be overwritten by command line -e  60
+size = 10 # model type 4 matrix size x size
+seqlen= size * size # length of input sequence
+epochs=100 # max number. training will stop earlier if accuracy not improving. can be overwritten by command line -e  60
 batch=64 # power of 2
 
-model_type=1 # = use model type 1 or 2 for last char of app/corpus. retrieve model type dynamically
-#1: one hot, pitch OR pitch$duration.  chord pitch either normal or full. single softmax. can only predict seen combinations
-#2: embedding, stacked RNN with attention. input integer indexes. multiple head , multiple softmax. can predict unseen combinations
+model_type=4 # = use model type 1 or 2 for last char of app/corpus. retrieve model type dynamically
+#1: one hot, stacked LSTM pitch OR pitch$duration.  chord pitch either normal or full. single softmax. can only predict seen combinations
+#2: embedding, stacked LSTM with attention. input integer indexes. multiple head , multiple softmax. can predict unseen combinations
+#3: embedding, stacked LSTM pitch OR pitch$duration.  chord pitch either normal or full. single softmax. can only predict seen combinations
+#4: test for micro
 
 ###########################################
 # training set and model names
 ###########################################
-app = 'goldberg'  # base name. should be synched with content of training directory
+id = 'test'  # base name. should be synched with content of training directory
+# IMMEDIATLY modified to include model type ,etc
+# the modified app is used in main, as well as used to create save file, and displayed in GUI (without extensions)
 # TRAINING: app/corpus. prefix for model saved file, and pickle corpus. models/app_<>
 # init remi corpus gui , to be able to reload new corpus
-# modify app/corpus name based on config
 
 # keras h5 model file name:
 # app1_c for concatenate, app1_nc for non concatenate
 # app2_v for velocity app2_nv for non velocity  app2_v
 # ends with _mo if normal (ie multiple octave ) else _so
 
-if model_type == 1:
-    app = app + '1'
-else:
-    app = app + '2'
+app = id + str(model_type)
 
-if model_type == 1 and  concatenate == False:
-    app = app + '_nc'
-if model_type == 1 and  concatenate == True:
-    app = app + '_c'
+if model_type in [1,3,4]:
+    if concatenate == False:
+        app = app + '_nc'
+    else:
+        app = app + '_c'
 
-if model_type == 2 and  predict_velocity == False:
-    app = app + '_nv'
-if model_type == 2 and  predict_velocity == True:
-    app = app + '_v'
+if model_type == 2:
+    if predict_velocity == False:
+        app = app + '_nv'
+    else:
+        app = app + '_v'
 
 if normal == True:
     app = app + '_so' # simple octave
@@ -92,9 +88,6 @@ else:
 	
 if model_type == 2:
     concatenate = False # create R$0.2 and model 2 believes this is a chord because there is a .
-
-# can be modified by GUI
-tfmodel = 'Full' # inference type , Full model or one of the TFlite. init remi and default inference
 
 
 ###################################
@@ -108,12 +101,12 @@ fixed_duration_midi_file = 0.3  # MIDI ONLY. in quarter length. in case duration
 #my_instrument = instrument.Clavichord()
 #my_instrument = instrument.Trumpet()
 my_instrument = instrument.Flute()
-temperature_midi = 0  # ie do not use temp
+temperature_midi = 0.1  # ie always use temp, but very high probability of selecting origininal argmax
 
 ###################################
 # real time synth only
 ###################################
-temperature = 0 # to init remi slider. slider between 0 and 1. 0 means does not use temp. can be modified via GUI.
+temperature = 0.1 # to init remi slider. slider 0.1 and 3.  
 predict_forever = 5000 # notes predicted for stream. 
 d1=0.3 # default fixed duration in QUARTER for streaming prediction. could also use random from most common duration OR predicted OR duration in concatenate
 d2=0.1 # for streaming. off time IN SEC. 
@@ -130,6 +123,9 @@ instrument = 'Church Organ' # to init remi
 
 time_signature_beat_per_measure = 4 # 4 beats per measure . not used I guess
 time_signature_beat_type = 4 # beat is quarter note. changing this is the same as changing BPM ?
+
+model4_mean=0
+model4_std=0
 
 
 """

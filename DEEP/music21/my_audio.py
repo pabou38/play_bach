@@ -13,6 +13,7 @@
 
 import pyaudio
 import fluidsynth
+
 import time
 import numpy as np
 import music21
@@ -232,22 +233,16 @@ def init_audio(sound_font):
         s=[]
         # Initial silence is 1 second
         # get_samples (len) to generate next chunck of data, len number of audio samples
-        s = np.append(s, fluid.get_samples(int(44100 * 1))) 
 
         fluid.noteon(0, 80+i, config_bach.velocity)
         fluid.noteon(0, 83+i, config_bach.velocity)
         fluid.noteon(0, 86+i, config_bach.velocity)
-
-        # Chord is held for 2 seconds
-        s = np.append(s, fluid.get_samples(int(44100*0.3)))
+        s = np.append(s, fluid.get_samples(int(44100*0.3))) # 0.3 sec on
 
         fluid.noteoff(0, 80+i)
         fluid.noteoff(0, 83+i)
         fluid.noteoff(0, 86+i)
-
-        # Decay of chord is held for 
-        #  cast to int
-        s = np.append(s, fluid.get_samples(int(44100*0.1)))
+        s = np.append(s, fluid.get_samples(int(44100*0.1))) # 0.1 sec off
 
         #convert an array of samples into a string of bytes suitable for sending to the soundcard, use
         samps = fluidsynth.raw_audio_string(s) # bytes
@@ -477,7 +472,7 @@ def get_audio_sample_from_one_pattern(pi, duration, velocity, fluid, instrument,
             n = music21.note.Note(pi) # convert string to note object, used to create stream
             #n.storedInstrument = instrument # instrument
 
-            # create MIDI list; convert quarter to sec
+            # create MIDI list; convert quarter to sec   F#3 , 0.3 gives ([54], 0.15)
             midi_list = ([n.pitch.midi],quarter_to_time(duration_in_quarter)) # get midi number for note object  
         except Exception as e:
             print ('exception pitch ', pi, str(e))
@@ -487,12 +482,12 @@ def get_audio_sample_from_one_pattern(pi, duration, velocity, fluid, instrument,
     ###############################
     #print('MIDI',i, midi_list, pi); i = i+1
     
-    # midi list is created list of [[midi number,], duration in sec]
+    # midi list is created list of [[midi number, ...], duration in sec] multiple MIDI number for chords
     # create audio sample from list of one or more midi number
     # 44.1 K samples per secondes 
     s=[] # audio sample
 
-    duration_sec = midi_list[1]
+    duration_sec = midi_list[1] # same duration for all notes in chords
 
     if midi_list[0][0] == -1: # rest
             # use duration in sec there
@@ -505,16 +500,17 @@ def get_audio_sample_from_one_pattern(pi, duration, velocity, fluid, instrument,
         # set VELOCITY
         for m in midi_list[0]:
             fluid.noteon(0, m, velocity)   # predicted velocity no longer from config file
-        # use duration in sec here
+        # use duration in sec here  0.15 sec  44.1 * 0.15 *2  len(s) = 13230
         s = np.append(s, fluid.get_samples(int(config_bach.sampleRate * duration_sec))) # chord is held for x seconds
         
-        # note off
+        # note off   duration is fixed  d2 =0.1 
         for m in midi_list[0]:
             fluid.noteoff(0, m)   
         s = np.append(s, fluid.get_samples(int(config_bach.sampleRate * config_bach.d2)))    # Decay of chord is held for x second
 
     #https://github.com/FluidSynth/fluidsynth/wiki/UserManual
     #https://github.com/nwhitehead/pyfluidsynth
+    # 44,1 * 2 * (0.15 + 0.1)  = 22.05 k samples
 
-    samps = fluidsynth.raw_audio_string(s)
-    return(samps)
+    samps = fluidsynth.raw_audio_string(s) # bytes
+    return(samps) # len 44100   2 bytes / samples ?
