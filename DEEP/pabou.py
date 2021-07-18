@@ -3,6 +3,12 @@
 
 # 30 jan 2021
 
+#################################
+# nvidia-smi: driver, CUDA release
+# nvcc --version: CUDA release eg 11.2
+# in (tf24) conda list cudnn
+#################################
+
 ##############################################
 # generic functions, to be used across applications
 # one level up to the main applications sources
@@ -36,13 +42,15 @@ env look at env variable. how to set PYTHON env variable?
 """
 # pip install prettytable
 
+import os, sys
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' 
 import tensorflow as tf
-import numpy as np
 
-import matplotlib as mpl
+import numpy as np
+import math
+
 import matplotlib.pyplot as plt
 #%matplotlib inline  # interactive in jupyter and colab
-import os,sys
 import tensorflow as tf
 import numpy as np
 import time
@@ -56,6 +64,7 @@ from prettytable import PrettyTable
 from datetime import date
 
 from tensorflow.python.ops import gen_dataset_ops
+from tensorflow.python.ops.gen_array_ops import list_diff_eager_fallback
 
 today = date.today()
 title = today.strftime("%d/%m/%Y")
@@ -64,27 +73,50 @@ title = today.strftime("%d/%m/%Y")
 # file names definition
 #################################################
 
-# base file names. will be prefixed by app so no ./   ie bach_./ will not work 
-# save, load models use models/app_<file name>
+# suffix file names.
+# file names are models/app1_c_o + <suffix> 
+full_model_SavedModel_dir = "_full_model"
+full_model_h5_file = '_full_model.h5' # will be saved as .h5py
+model_json_file = '_full_model.json'
+lite_model_file = '_lite.tflite'
 
-full_model_SavedModel_dir = "full_model_SavedModel_dir"
-full_model_h5_file = 'full_model_h5.h5' # will be saved as .h5py
-model_json_file = 'full_model_json.json'
-# png_file(training result) is passed as argument from main
-
-# TFlite base file name, ie before prefix. will be prefixed by models/app_
-# tflite_*_file are alias to real file names
-
-tflite_fp32_file = 'fp32-only.tflite' # no quant
-tflite_default_file = 'weigths-quantized.tflite' # default quant variable param still float
-tflite_default_representative_file = 'weigths-and-layers-quantized.tflite' # variable param quantized
-tflite_int_fp_fallback_file = 'quantized-with-floating-point-fallback.tflite'
-tflite_int_only_file = 'quantized-for-TPU.tflite' # TPU, micro
-tflite_FP16_file = 'fp16-for-GPU.tflite' # GPU delegate
-tflite_16by8_file = '16-activation-8-w.tflite' # similar to int only, 
+#will be prefixed by models/app
+label_txt = '_labels.txt' # dictionnary of labels, to be included in metadata
+micro_model_file = '_micro.cpp' # for microcontroler
+corpus_cc = 'corpus.h'
+dict_cc = 'dictionary.h'
 
 
-######################################################
+
+# GUI corpus built by removing  _full_model.h5  and .tflite
+# need to find a way to distinguish lite files in GUI, where the .tflite extension is lost
+# if a corpus ends with '_lite' it is a TFlite. test in main 
+
+# TFlite suffix file name. will be prefixed by models/app
+# app is id1_c_o and is the same for full and lite
+# append _fp32_lite.tflite to app
+tflite_fp32_file = '_fp32' + lite_model_file # no quant fp32 only
+tflite_default_file = '_default'  + lite_model_file # default quant variable param still float
+tflite_default_representative_file = '_adapt' + lite_model_file # variable param quantized
+tflite_int_fp_fallback_file = '_quant-fp' + lite_model_file
+tflite_int_only_file = '_TPU' + lite_model_file # TPU, micro
+tflite_FP16_file = '_GPU' + lite_model_file # GPU delegate
+tflite_16by8_file = '_16by8' + lite_model_file # similar to int only, 
+
+# all tflite files
+all_tflite_file = [tflite_int_only_file, tflite_fp32_file,
+tflite_default_file, tflite_default_representative_file, 
+tflite_int_fp_fallback_file, tflite_FP16_file, tflite_16by8_file]
+
+# file system name is app + tflite_...._file, ie cello1_nc_mo _GPU _lite.tflite
+
+# edgeTPU file (output from compiler)     bla.tflite => bla_edgeptu.tflite
+#_TPU_lite.tflite  => _TPU_lite_edgetpu.tflite
+
+tflite_edge_file = tflite_int_only_file.replace('lite.tflite','lite_edgetpu.tflite')
+
+
+#######################################################
 # parse CLI arguments 
 # set CLI in launch.json for vscode
 # set CLI with -xxx for colab
@@ -98,19 +130,15 @@ def parse_arg(model_type): # parameter not used yet
     
     parser.add_argument("-l", "--load_model", type=int, choices=[0, 1], default=1,  help="optional. default 1.  use -l=1 to load an already trained SavedModel or h5. use -l=0 to create empty model")
     parser.add_argument("-f", "--fit", help="optional. -f to fit model. default FALSE, ie do not fit or refit", action="store_true", default =0)
-    parser.add_argument("-p", "--predict", help="optional. -p to predict with FULL model, benchmark and create midi file. default FALSE", action="store_true", default =0)
+    parser.add_argument("-pm", "--predict_midi", help="optional. -pm to predict with FULL model, benchmark and create midi file. default FALSE", action="store_true", default =0)
     parser.add_argument("-bf", "--benchmark_full", help="optional. -b to benchmark full model. default FALSE", action="store_true", default =0)
     parser.add_argument("-bl", "--benchmark_lite", help="optional. -b to benchmark all lite model. default FALSE", action="store_true", default =0)
     parser.add_argument("-sl", "--savelite", action="store_true", default =0,   help="optional. default FALSE. use -sl to convert SaveModel to TFlite models")
     parser.add_argument("-st", "--stream", action="store_true", default =0,   help="optional. default FALSE. use -st to initiate real time stream")
     # use of TFlite for prediction is thru GUI
 
-    # not really used
     parser.add_argument("-e", "--epochs", type=int, help="optional. use -e=5 to overwrite number of epochs in config file. DEFAULT=10. using debug mode will set to small number anyway")
-    parser.add_argument("-d", "--debug", action="store_true", default =0,   help="optional. default FALSE. use -d to run in debug mode, ie small corpus (delete any existing pick) and hardcoded few epochs. debug is an OR of this argument and config file")
-    parser.add_argument("-i", "--inference", type=int , default=30,  help="optional. number of inferences. typically for benchmarks")
-    parser.add_argument("-s", "--ssh", action="store_true", default =0,   help="optional. default FALSE. use -s to disable plotting , when in ssh connection")
-
+    
     # return from parsing is NOT a dict, a namespace
     parsed_args=parser.parse_args() #Namespace(load=0, new=True, predict=0, retrain=0) NOT A DICT
     # can access as parsed_args.new if stay as namespace
@@ -175,7 +203,7 @@ def see_training_result(history, test_acc , png_file, model_type):
     loss = history_dict['loss'] # always there, but no global accuracy ?
     val_loss = history_dict['val_loss']
      
-    if model_type == 1:
+    if model_type in[1,3,4]:
         """
         history dictionary keys: dict_keys(['loss', 'accuracy', 'val_loss', 'val_accuracy', 'lr']) :
         """
@@ -225,8 +253,7 @@ def see_training_result(history, test_acc , png_file, model_type):
             test_acc[0] , test_acc[1], test_acc[2]))
 
         print('PABOU: actuals EPOCHS: ' , e) # in case of early exit, epoch not 60
-       
-        
+
     epochs = range (1, e + 1)
 
     # new window
@@ -244,7 +271,7 @@ def see_training_result(history, test_acc , png_file, model_type):
     # plt.plot, .scatter , .bar
     """
 
-    if model_type == 1:   
+    if model_type in [1,3,4]:   
 
         # loss and single accuracy
 
@@ -316,20 +343,19 @@ def see_training_result(history, test_acc , png_file, model_type):
 
         print('PABOU: save training histoty plot ', png_file)
         figure.savefig(png_file)
-        
+            
+    #################################
     print('PABOU: plot training history')
+    # comment to not block on display
     #plt.show(block=False)
-    plt.show()
+    #plt.show()
+    #################################
 
 ######################################################
 # print various info. return os and platform
 ######################################################
 def print_tf_info():
-
-    print('\n')
-    print ("PABOU: ========= > tensorflow version: < ============ ",tf.__version__)
-    
-
+    print ("\nPABOU: ========= > tensorflow version: < ============ ",tf.__version__)
     #https://blog.tensorflow.org/2020/12/whats-new-in-tensorflow-24.html
     # TensorFlow 2.4 supports CUDA 11 and cuDNN 8,
 
@@ -348,10 +374,13 @@ def print_tf_info():
         print('PABOU Exception cuda cudnn version not available ' , str(e))
     """
 
+    import tensorflow.python.platform.build_info as build
+    print('PABOU: CUDA ', build.build_info['cuda_version'])
+    print('PABOU: cudnn ',build.build_info['cudnn_version'])
+
     print('\nPABOU: list devices')
     from tensorflow.python.client import device_lib
     print ("\nPABOU: devices available:\n ", str(device_lib.list_local_devices()))
-
 
     print('\nPABOU: test is gpu is available')
     try:
@@ -368,7 +397,6 @@ def print_tf_info():
         print ('GPU device not found')
     print('======= > Found GPU at: {}'.format(device_name))
 
-    
     print ("PABOU: numpy ", np.__version__)
     print ("PABOU: sklearn ", sklearn.__version__) 
     print ("PABOU: scipy", scipy.__version__)  
@@ -438,12 +466,12 @@ def see_model_info(model, plot_file):
 
 ##################################################
 # model accuracy from any dataset
+# uses logit and keras accuracy
+# model(x) returns logits = softmax for our model
 ##################################################
-
 def see_model_accuracy(model, x_test, y_test):
     try:
         logits = model(x_test) #  array of prediction, ie softmax for MNIST: TensorShape([48000, 10]) 
-
         # get prediction label from softmax
         prediction = np.argmax(logits, axis=1) # array([3, 6, 6, ..., 0, 4, 9], dtype=int64) (48000,)
 
@@ -454,7 +482,6 @@ def see_model_accuracy(model, x_test, y_test):
             truth = np.argmax(y_test, axis=1) # assumes Y is one hot
         except:
             truth = y_test
-
         keras_accuracy = tf.keras.metrics.Accuracy()
         keras_accuracy(prediction, truth)
 
@@ -465,22 +492,41 @@ def see_model_accuracy(model, x_test, y_test):
         print('PABOU: Exception see model accuracy ' , str(e))
 
     
-    
 ######################################################
 # save FULL model. SavedModel, h5, weigth from checkpoints (999), json
+# tflite model are saved in save_all_tflite_models, after conversion from SavedModel
+# WARNING: SavedModel have a signature for output, add a dimension as per TFlite [1,40,129]
+# not added for h5 model, which are used as Full model
 ######################################################
 # generic save FULL model in various forms. save in Saved Model (dir), hf5(file) and json
 # app is a string, identifies the app, make file names unique, even if not in same dir
 # checkpoint path is handled in main,path are /ddd or \nnnn 
 def save_full_model(app, model, checkpoint_path): # app is a string
-    # return size of h5 file
 
-    # suffix with _ done here
-    # app is set to cello 1|2 nc nv mo|so in config_bach.py
+    # model 1 input is TensorShape([None, 40, 95])
+    # model 3 TensorShape([None, 40])
+
+    ##############################################
+    # check if generic enough
+    ##############################################
+    print ("model inputs ", model.inputs) #  [0] is <KerasTensor: shape=(None, 40, 483) dtype=float32 (created by layer 'pitch')>]
+    print ("model outputs ", model.outputs) #  [<KerasTensor: shape=(None, 483) dtype=float32 (created by layer 'softmax')>]
+    seqlen = model.inputs[0].shape[1] # do not import config_bach to stay generic
     
-    tf_dir = app + '_' +  full_model_SavedModel_dir
-    h5_file = app + '_' +  full_model_h5_file # will be saved as .h5py
-    json_file = app + '_' + model_json_file
+    if len(model.inputs[0].shape) > 2:
+        hotsize = model.inputs[0].shape[2]
+    else: # model 3
+        hotsize = 1 # is input size = 1 (ie seqlen of int the same of dim = 2 ?)
+   
+    print('PABOU: saving full model for: %s, seqlen %d, hotsize %d' %(app ,seqlen, hotsize))
+    # return size of h5 file
+    # suffix with _ done here
+    # app is set to cello 1|2 nc nv mo|so as defined  config_bach.py
+    # seqlen and hotsize are needed for signature
+    
+    tf_dir = app +  full_model_SavedModel_dir
+    h5_file = app +  full_model_h5_file # will be saved as .h5py
+    json_file = app  + model_json_file
 
     tf_dir = os.path.join('models' , tf_dir)
     h5_file = os.path.join('models' , h5_file)
@@ -492,22 +538,24 @@ def save_full_model(app, model, checkpoint_path): # app is a string
     #The SavedModel files that were created contain: A TensorFlow checkpoint containing the model weights. A SavedModel proto containing the underlying TensorFlow graph.
     
     print('\nPABOU: save full model as SavedModel. directory is: ' , tf_dir)
-    model.save(tf_dir, save_format="tf")
-
-    """
+    
     #################################################################
     # Keras LSTM fusion Codelab.ipynb
     #https://colab.research.google.com/github/tensorflow/tensorflow/blob/master/tensorflow/lite/examples/experimental_new_converter/Keras_LSTM_fusion_Codelab.ipynb#scrollTo=tB1NZBUHDogR
     run_model = tf.function(lambda x: model(x))
     # This is important, let's fix the input size.
-    BATCH_SIZE = None
-    STEPS = 40
-    INPUT_SIZE = 483
+    BATCH_SIZE = 1
+    STEPS = seqlen
+    INPUT_SIZE = hotsize # is input size = 1 (ie seqlen of int the same of dim = 2 ?)
     signature = run_model.get_concrete_function(
      tf.TensorSpec(shape = [BATCH_SIZE, STEPS, INPUT_SIZE], dtype = model.inputs[0].dtype))
-    model.save(tf_dir, save_format="tf", signatures=signature) # save_format is tf by default. pass a dir
+    # NOTE: use inputs[0]
+
+    # so inferences input need to have 3 dim.  
     ###################################################################
-    """
+    
+    model.save(tf_dir, save_format="tf", signatures=signature) # save_format is tf by default. pass a dir
+    #model.save(tf_dir, save_format="tf")
 
     # Recreate the exact same model
     #new_model = tf.keras.models.load_model('path_to_saved_model')
@@ -547,71 +595,93 @@ def save_full_model(app, model, checkpoint_path): # app is a string
 #####################################
 
 def get_h5_size(app):
-     h5_file = app + '_' +  full_model_h5_file # will be saved as .h5py
+     h5_file = app +  full_model_h5_file # will be saved as .h5py
      h5_file = os.path.join('models' , h5_file)
      h5_size = round(float(os.path.getsize(h5_file) / (1024*1024)),1)
      return(h5_size)
+
     
 ######################################################
-# load FULL model
-# from type, can load from h5, SavedModel or from empty model and checkpoint 
+# load model Full ou Lite
+# can load from h5, SavedModel or from empty model and checkpoint. can also load TFlite model
+# return Keras model or TFlite interpreter 
 ######################################################
 # if load from checkpoint, expect empty to be a empty model. otherwize not used
-# app is the string which identify apps, type is 'h5' or 'tf' (SavedModel) or 'cp'. cp load latest chckp in empty model which is created
+# app is the string which identify apps, ALREADY has cell1_c_o
+# type is 'h5' or 'tf' (SavedModel) or 'cp', or 'li'. 
+
+# empty and checkpoint parameters only used when loading from checkpoint
+# cp load latest chckp in empty model which passed as argument
+
+# full model are loaded from h5 file
+# tflite models are loaded from SavedModel (see signatures)
+
 def load_model(app, type, empty, checkpoint_path):
 
-    # prefix with cello_
-    tf_dir = app + '_' +  full_model_SavedModel_dir
-    h5_file = app + '_' +  full_model_h5_file # will be saved as .h5py
-    json_file = app + '_' + model_json_file
+    # add suffix ie cello1_c_mo  cello1_c_mo _xxxxx
+    tf_dir = app +  full_model_SavedModel_dir
+    h5_file = app  +  full_model_h5_file 
+    json_file = app  + model_json_file
+    lite_file = app + lite_model_file
 
     # put under models
     tf_dir = os.path.join('models' , tf_dir)
     h5_file = os.path.join('models' , h5_file)
     json_file = os.path.join('models' , json_file)
+    lite_file = os.path.join('models' , lite_file)
 
     if type == 'h5':
         try: 
-            print('load FULL model as h5 from: %s' %(h5_file))
             model = tf.keras.models.load_model(h5_file) 
-            print ("loaded FULL h5 model from %s" %(h5_file))
+            print ("PABOU loaded FULL h5 model from %s" %(h5_file))
             return(model)
         except Exception as e:
-            print('Exception %s when loading h5 model from %s.' %(str(e),h5_file)) 
+            print('PABOU: Exception %s when loading h5 model from %s.' %(str(e),h5_file)) 
             return(None)
             
     if type == 'tf':
         try:
-            print('load FULL model as tf %s' %(tf_dir))
+            
             model = tf.keras.models.load_model(tf_dir) # dir
-            print ("loaded full tf model from %s" %(tf_dir))
+            print ("PABOU: loaded full tf model from %s" %(tf_dir))
             return(model)
         except Exception as e:
-            print('Exception %s when loading tf model from %s' %(str(e),tf_dir))
+            print('PABOU: Exception %s when loading tf model from %s' %(str(e),tf_dir))
             return(None)
             
     if type == 'cp':    
         try:
-                print('got an empty model. load latest checkpoint')
+                print('PABOU: got an empty model. load latest checkpoint')
                 checkpoint_dir = os.path.dirname(checkpoint_path)
                 latest = tf.train.latest_checkpoint(checkpoint_dir)
-                print ('load latest checkpoint. weights only:', latest)
+                print ('PABOU: load latest checkpoint. weights only:', latest)
                 empty.load_weights(latest)
                 return(empty)
         except Exception as e:
                 print('!!!! cannot load checkpoint %s' %(str(e)))
                 return(None)
+
+    if type == 'li':
+        try:
+                print('PABOU: load TFlite model from %s: ' %(lite_file))
+                # creater interpreter once for all. create from TFlite file
+                interpreter = tf.lite.Interpreter(lite_file) 
+                return(interpreter)       
+        except Exception as e:
+                print('!!!! cannot load TFlite file %s' %(str(e)))
+                return(None)
                 
-    print('unknown type')
+    print('PABOU: !!!!! ERROR load model. unknown type')
+    return(None)
 
 
 ############################################################
 # add meta data to tflite model
 # model 1 only for now
 # ZIP file unzip mobilenet_v1_0.75_160_quantized_1_metadata_1.tflite
-#https://stackoverflow.com/questions/64097085/issue-in-creating-tflite-model-populated-with-metadata-for-object-detection
 ############################################################
 
+#https://stackoverflow.com/questions/64097085/issue-in-creating-tflite-model-populated-with-metadata-for-object-detection
 #https://github.com/tensorflow/examples/blob/master/lite/examples/image_classification/metadata/metadata_writer_for_image_classifier.py
 
 
@@ -619,18 +689,21 @@ def add_tflite_meta_data(app, tflite_file_name, model_type, hot_size_pi, descrip
 
     # hot size is needed for metadata output range
     # app is needed to include label.txt
-    # app_labels.txt is created in models directory
+    # app_labels.txt is created in models directory. list of dictionaries. just referenced in metadata
     # tflite file name is the name of the output. same as input
-
     # description is custo string, will go in meta.description
 
-    if model_type != 1:
+    # insert label, but also additional files not required, requirements.txt
+
+    if model_type == 2:
         print('not implemented for model %d' %model_type)
         return(None)
 
-    x = app + '_' +  'labels.txt'
+
+    # label contains 3 dictionary with unique pi, du, ve
+    x = app + label_txt
     label_file_name = os.path.join('models', x) # label_file is an object
-    print('PABOU: metadata label file name: ', label_file_name)
+    print('PABOU: metadata (label dictionaries) file name: ', label_file_name)
     
 
     from tflite_support import flatbuffers
@@ -644,7 +717,7 @@ def add_tflite_meta_data(app, tflite_file_name, model_type, hot_size_pi, descrip
     model_meta.name = "Bach generator"
     model_meta.description = ("Real time streaming to any browser. LSTM with attention. Multiple corpus. GUI")
     model_meta.version = "v2"
-    model_meta.author = "pabou. Meaudre Robotics"
+    model_meta.author = "pabou. pboudalier@gmail.com. Meaudre Robotics"
     model_meta.license = ("GNU GPL 3")
 
     # Creates input info.
@@ -654,7 +727,7 @@ def add_tflite_meta_data(app, tflite_file_name, model_type, hot_size_pi, descrip
     input_pitch_meta = _metadata_fb.TensorMetadataT()
     #input_pitch_meta.description = "sequence of one hot encoded representing pitches index"
     input_pitch_meta.description = description
-    input_pitch_meta.name = "pitch input for Bach LSTM"
+    input_pitch_meta.name = "input tensor: pitch as one hot or interger"
     
 
     # how to specifify LSTM seqlen etc ..
@@ -681,8 +754,8 @@ def add_tflite_meta_data(app, tflite_file_name, model_type, hot_size_pi, descrip
     # output generic
     output_pitch_meta = _metadata_fb.TensorMetadataT()
 
-    output_pitch_meta.name = "softmax probability"
-    output_pitch_meta.description = "Probabilities of next note,duration"
+    output_pitch_meta.name = "softmax probability. model 1 or 3"
+    output_pitch_meta.description = "Probabilities of next note, duration, velocity"
 
     # output content
     output_pitch_meta.content = _metadata_fb.ContentT()
@@ -736,9 +809,10 @@ def add_tflite_meta_data(app, tflite_file_name, model_type, hot_size_pi, descrip
     f1 = os.path.join(os.getcwd(), 'requirements','my_requirement_pip.txt')
     f2 = os.path.join(os.getcwd(), 'requirements','my_requirement_conda.txt')
     
-    print('PABOU: add file %s %s %s in metadata. labels and requirements' %(f1,f2,label_file_name) )
+    #print('PABOU: add file %s %s %s in metadata. labels and requirements' %(f1,f2,label_file_name) )
 
-    populator.load_associated_files([f1,f2, label_file_name])
+    #populator.load_associated_files([f1,f2, label_file_name])
+    populator.load_associated_files([label_file_name])
     populator.populate()
 
     # create json file with metadata
@@ -750,8 +824,8 @@ def add_tflite_meta_data(app, tflite_file_name, model_type, hot_size_pi, descrip
     metadata_json_file = os.path.join(os.getcwd(), 'models', app + '_metadata.json')
     with open(metadata_json_file, "w") as f:
         f.write(json_content)
-    print('PABOU: save metadata to json file %s' % metadata_json_file)
-    print('PABOU: metadata json content: ', json_content)
+    #print('PABOU: save metadata to json file %s' % metadata_json_file)
+    #print('PABOU: metadata json content: ', json_content)
 
     print("PABOU: associated files in metadata: ", displayer.get_packed_associated_file_list())
 
@@ -759,141 +833,140 @@ def add_tflite_meta_data(app, tflite_file_name, model_type, hot_size_pi, descrip
 
 
 
-# display type of TFlite input and output tensors
 def see_tflite_tensors(tflite_model):
-
-    print('PABOU: show TFlite tensors type')
-
     interpreter = tf.lite.Interpreter(model_content=tflite_model)
     input_type = interpreter.get_input_details()[0]['dtype']
-    print('input tensor: ', input_type)
+    print('TFlite input tensor: ', input_type)
     output_type = interpreter.get_output_details()[0]['dtype']
-    print('output tensor: ', output_type)
-
+    print('TFlite output tensor: ', output_type)
 
 #Netron is a viewer for neural network, deep learning and machine learning models.
 
-####################################################
-# TF lite save ALL model
-# note see also CLI tflite_convert --output_file --saved_model_dir --keras_model_file
-
-# tflite_*_file are alias to real file names
-# tflite_fp32_file = 'fp32_only.tflite' # no quant
-
-#x = app + '_' +  tflite_fp32_file
-#tflite_fp32 = os.path.join('models', x)
-#tflite_* are real file name in file system with path to models
-####################################################
-
-
-
 #################################################################
 # A generator that provides a representative dataset
-# To quantize the variable data (such as model input/output and intermediates between layers), 
-# you need to provide a RepresentativeDataset.
-# To support multiple inputs, each representative data point is a list and elements in the 
-# list are fed to the model according to their indices.
+# Unlike constant tensors such as weights and biases, variable tensors such as model input, activations (outputs of intermediate layers) and model output cannot be calibrated unless we run a few inference cycles
+# To support multiple inputs, each representative data point is a list and elements in the list are fed to the model according to their indices.
 #################################################################
-
 gen = [] # need to be visible by generator in this module
-
 def representative_dataset_gen():
-    global gen
+    global gen # test set set in save_all_lite gen (x_test) shape: (3239, 100), dtype: int32. single sample (100,) int32
+    global model_ttype # set in save_all_lite
+    global input_dtype #  set in save_all_lite. np type
     
-    print('PABOU: calling representative dataset generator ' , gen.shape)
-    for input_value in tf.data.Dataset.from_tensor_slices(gen).batch(1).take(100):
-        #print(input_value) 
-        # Model has only one input so each data point has one element.
-        # print(input_value.shape, type(input_value))
-        #yield [input_value.astype(tf.float32)] tensorflow.python.framework.ops.EagerTensor' object has no attribute 'astype'
+    print('PABOU: calling representative dataset generator: gen (x_test) shape: %s, dtype: %s. single sample %s %s' %(gen.shape, gen.dtype, gen[0].shape, gen[0].dtype))
+    print('PABOU: input dtype ' , input_dtype) # model input. float32 for CONV2D
+    for input_value in gen[:1000]: #(40,)
+        
+        # model 1 is one hot of float32
+
+        if model_ttype == 1:
+            input_value = np.expand_dims(input_value,axis=0) # add batch dimension ie  (1,....)
+            input_value = input_value.astype(input_dtype) 
+
+        if model_ttype in [2,3]:
+            # input layer was left as default in model3 definition, ie float 32. 
+            # because setting it to int32 cause TPU TFlite conversion to dies mysteriously and silently
+            # x_test is from vectorization and default to int32
+
+            input_value = np.expand_dims(input_value,axis=0) # add batch dimension ie  (1,....)
+            input_value = np.expand_dims(input_value,axis=-1)
+
+            # cast to input type as defined in model
+            input_value = input_value.astype(input_dtype) 
+
+        if model_ttype == 4:
+            d = input_value.shape[0] # array of int32 (100,)
+            d = int(math.sqrt(d))
+            input_value = np.reshape(input_value, (d, d)) # (100,) to (10, 10) , still int32
+
+            # at this point (6,6) conv2D expect 4 dims
+            input_value = np.expand_dims(input_value,axis=0) # add batch
+            input_value = np.expand_dims(input_value,axis=-1) # (1,10,10,1), still int32
+
+            input_value = input_value.astype(input_dtype)  # float32 for CONV2D
+
         yield [input_value]
 
+    # 
 
-def save_all_tflite_models(app, x_gen, model_type, hot_size_pi):
+####################################################
+# TF lite save ALL models 
+# all quantization
+# also creates model.cpp file for micro controler and edgetpu model, both from INT only quantization
+# alignas(8) const unsigned char model_tflite[] = {
+# note see also CLI tflite_convert --output_file --saved_model_dir --keras_model_file
+# only on linux. on windows , use WSL to create CC model
+####################################################
+def save_all_tflite_models(app, x_gen, model_type, hot_size_pi, model):
+
+    # hot size is for metadata
     global gen # to be visible in generator
-    gen = x_gen # x_gen is training set
+    global model_ttype # to be visible in generator
+    global input_dtype # to be visible in generator
+    gen = x_gen # x_gen is test set
+    model_ttype = model_type # from param
+
+    # expected input type, as Numpy  type
+    # needed by generator.  generator will cast to this 
+    input_dtype = model.inputs[0].dtype.as_numpy_dtype # float32 for CONV2D
 
     #x_gen is x_train, or [x_train, x1_train] or [x_train, x1_train, x2_train]. use for representative data set
     # representative data set for quantization need to least 100
-
     meg = 1024*1024
-
     # hot size is for metadata
 
-    print('PABOU: representative data set shape', x_gen.shape)
-    
+    print('PABOU: will use representative data set: ', x_gen.shape)
     # always use converter from save model (vs from keras instanciated model)
 
     # path to full model dir, to convert from to TFlite
-    tf_dir = app + '_' +  full_model_SavedModel_dir # from save model
+    tf_dir = app +  full_model_SavedModel_dir # from save model
     tf_dir = os.path.join('models' , tf_dir)
 
     # path to h5 file , to convert from to TFlite
-    h5_file = app + '_' +  full_model_h5_file # from h5 file
+    h5_file = app +  full_model_h5_file # from h5 file
     h5_file = os.path.join('models' , h5_file)
 
 
-    # file name for TFlite quantization 
+    # file name for TFlite models.  all file are .tflite
     # tflite_* are full name in file system. just appended some prefix
     # tflite_*_file are just file name which do not exists in file system
 
-    x = app + '_' +  tflite_fp32_file
+    x = app +  tflite_fp32_file
     tflite_fp32 = os.path.join('models', x)
 
-    x = app + '_' +  tflite_default_file
+    x = app +  tflite_default_file
     tflite_default = os.path.join('models', x)
 
-    x = app + '_' +  tflite_default_representative_file
+    x = app +  tflite_default_representative_file
     tflite_default_representative = os.path.join('models', x)
 
-    x = app + '_' +  tflite_int_fp_fallback_file
+    x = app +  tflite_int_fp_fallback_file
     tflite_int_fp_fallback = os.path.join('models', x)
 
-    x = app + '_' +  tflite_int_only_file
+    x = app +  tflite_int_only_file
     tflite_int_only = os.path.join('models', x)
 
-    x = app + '_' +  tflite_FP16_file
+    x = app +  tflite_FP16_file
     tflite_fp16 = os.path.join('models', x)
 
-    x = app + '_' +  tflite_16by8_file
+    x = app +  tflite_16by8_file
     tflite_16by8 = os.path.join('models', x)
+    
+    #model = tf.keras.models.load_model(tf_dir) # dir
+    #model = tf.keras.models.load_model(h5_file) # file
+    #converter = tf.lite.TFLiteConverter.from_keras_model(model)
 
 
     # create converter
-
-    # always use converter from save model (vs from keras instanciated model)
-    
-    """
-    print('PABOU: load keras model from SavedModel %s' %(tf_dir))
-    model = tf.keras.models.load_model(tf_dir) # dir
-    """
-
     # recommended . create converter from disk based savedModel
+    # always use converter from save model (vs from keras instanciated model)
     print ('PABOU: convert to TFlite flat buffer from SavedModel: ' , tf_dir)
-    converter = tf.lite.TFLiteConverter.from_saved_model(tf_dir)
-    
-    
-    """
-    # use h5
 
-    print('PABOU: load keras model from h5 file %s, to convert to TFlite' %(h5_file))
-    model = tf.keras.models.load_model(h5_file) # file
-
-    print('PABOU: convert to TFlite flat buffer from Keras model')
-    converter = tf.lite.TFLiteConverter.from_keras_model(model)
-    """
-
-    """
-    prior 2.3 ?
-    print('PABOU: use TF ops as well as TFlite')
-    converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS, tf.lite.OpsSet.SELECT_TF_OPS]
-    """
-
-
+    # USES representative data set:  TPU, default variable, int fp fallback , experimental
+    # do NOT use: fp32 (no quantization), default, fp16, 
 
 
     def tpu(model_type, hot_size_pi, description):
-        
         ############################################################################ 
         # case 2 TPU: enforce INT int only and generate error for ops that cannot be quantized
         # 4x smaller, 3x speeded
@@ -904,37 +977,39 @@ def save_all_tflite_models(app, x_gen, model_type, hot_size_pi):
         Additionally, to ensure compatibility with integer only devices (such as 8-bit microcontrollers) and accelerators 
         (such as the Coral Edge TPU), you can enforce full integer quantization for all ops including the input and output, 
         by using the following steps:
-
         To quantize the input and output tensors, and make the converter throw an error if it encounters an operation it cannot quantize, 
         convert the model again with some additional parameters:
         """
+        print('PABOU: INT8 only for TPU. creates file: %s\n' % tflite_int_only)
 
-        print('\nPABOU: INT8 only for TPU. creates file: %s\n' % tflite_int_only)
+        converter = tf.lite.TFLiteConverter.from_saved_model(tf_dir) # creates new converter each time ?
 
-        
         # This enables quantization
         converter.optimizations = [tf.lite.Optimize.DEFAULT]
         # This sets the representative dataset for quantization
         converter.representative_dataset = representative_dataset_gen
 
         # This ensures that if any ops can't be quantized, the converter throws an error
-        #converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8] 
-        converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8, tf.lite.OpsSet.TFLITE_BUILTINS]
+        
+        converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
         # For full integer quantization, though supported types defaults to int8 only, we explicitly declare it for clarity.
-
         converter.target_spec.supported_types = [tf.int8]
         # These set the input and output tensors to uint8 (added in r2.3)
-        converter.inference_input_type = tf.uint8
-        converter.inference_output_type = tf.uint8
+        converter.inference_input_type = tf.int8
+        converter.inference_output_type = tf.int8
+
+        #micro wants int8, not uint8
 
         try:
             tflite_model = converter.convert()
             open(tflite_int_only, "wb").write(tflite_model)
 
-            print('\nPABOU:===== OK INT8 only. CPU, TPU, MICRO. %s ' % tflite_int_only)
-            print('full model %0.1f, lite mode %0.1f ' %( os.path.getsize(h5_file)/meg, os.path.getsize(tflite_int_only)/meg )) 
-
+            print('\nPABOU:============================= OK INT8 only. CPU, TPU, MICRO. %s\n' % tflite_int_only)
+            print('full model %0.1f, lite mode %0.1f' %( os.path.getsize(h5_file)/meg, os.path.getsize(tflite_int_only)/meg )) 
             see_tflite_tensors(tflite_model)
+
+            # models for micro controler and edge TPU created after all tflite models
+            # edgetpu compiler only run on linux 
 
             try:
                 add_tflite_meta_data(app, tflite_int_only, model_type, hot_size_pi, description) # pass file name which exist in file system, not binary model
@@ -943,7 +1018,7 @@ def save_all_tflite_models(app, x_gen, model_type, hot_size_pi):
                 print('PABOU: cannot add metadata to %s. %s. maybe model 2' %(tflite_fp32, str(e)))
 
         except Exception as e:
-            print('\nPABOU:===== Exception converting to tflite INT8 only ', str(e))
+            print('PABOU:===== Exception converting to tflite INT8 only ', str(e))
             #module 'tensorflow.lite.python.schema_py_generated' has no attribute 'Model'
             # Failed to parse the model: pybind11::init(): factory function returned nullptr.
 
@@ -954,42 +1029,43 @@ def save_all_tflite_models(app, x_gen, model_type, hot_size_pi):
         ##############################################################
         # hot needed for metadata
 
-        print('\nPABOU: default fp32 without quantization. creates file: %s\n' % tflite_fp32)
+        print('PABOU: TFlite convert: fp32 without quantization. creates file: %s\n' % tflite_fp32)
 
-        converter.inference_input_type = tf.float32 # was set to int8 in tpu
+        converter = tf.lite.TFLiteConverter.from_saved_model(tf_dir)
+
+        converter.inference_input_type = tf.float32 # is set to int8 in tpu
         converter.inference_output_type = tf.float32
         
-        tflite_model = converter.convert() 
-        # tflite model is a bytes b' \x00\x00\x00TFL3\x00\x00\x00\  <class 'bytes'>
-        
-
-        open(tflite_fp32, "wb").write(tflite_model) # complete name in file system with prefix
-        print('\nPABOU:==== OK: created %s. using 32-bit float values for all parameter data\n\n' %tflite_fp32)
-
-        see_tflite_tensors(tflite_model)
-
-        print('PABOU: full model %0.1f Meg, lite mode %0.1f Meg ' %( os.path.getsize(h5_file)/meg, os.path.getsize(tflite_fp32)/meg )) 
-
-        ##############################################
-        # metadata. only implemented for model 1
-        ##############################################
-        print('PABOU:add metadata to TFlite file model 1')
         try:
-            add_tflite_meta_data(app, tflite_fp32, model_type, hot_size_pi, description) # pass file name which exist in file system, not binary model
-            # model 1 only for now
-        except Exception as e:
-            print('PABOU: cannot add metadata to %s. %s. maybe model 2' %(tflite_fp32, str(e)))
-        
+            tflite_model = converter.convert() 
+            # tflite model is a bytes b' \x00\x00\x00TFL3\x00\x00\x00\  <class 'bytes'>
+            open(tflite_fp32, "wb").write(tflite_model) # complete name in file system with prefix
+            print('\nPABOU:========================== OK: created %s. using 32-bit float values for all parameter data\n' %tflite_fp32)
+            print('PABOU: full model %0.1f Meg, lite model %0.1f Meg ' %( os.path.getsize(h5_file)/meg, os.path.getsize(tflite_fp32)/meg )) 
+            see_tflite_tensors(tflite_model)
 
+            ##############################################
+            # metadata. only implemented for model 1
+            ##############################################
+            print('PABOU:add metadata to TFlite file model 1')
+            try:
+                add_tflite_meta_data(app, tflite_fp32, model_type, hot_size_pi, description) # pass file name which exist in file system, not binary model
+                # model 1 only for now
+            except Exception as e:
+                print('PABOU: cannot add metadata to %s. %s. maybe model 2' %(tflite_fp32, str(e)))
+
+        except Exception as e:
+            print('cannot convert fp32')
+    
         #Vous pouvez utiliser Netron pour visualiser vos métadonnées,
 
     def default(model_type, hot_size_pi, description):
-
         #############################################################
-        # case 3: dynamic range. fixed params, ie Weights converted from fp to int8
-        # variable data still fp , no representative data set
+        # case 3: Weights statically converted from fp to int8
+        # inpout, output still fp 
         # 4x smaler, 2,3 x speed
         # for CPU
+        # no need for representative data set
         #############################################################
 
         """
@@ -1005,8 +1081,9 @@ def save_all_tflite_models(app, x_gen, model_type, hot_size_pi):
         with dynamic-range ops is less than a full fixed-point computation.
         """
 
-        print('\nPABOU: Default, Weigths converted to int8. creates file: %s \n' % tflite_default)
+        print('PABOU: Default, Weigths converted to int8. creates file: %s \n' % tflite_default)
 
+        converter = tf.lite.TFLiteConverter.from_saved_model(tf_dir)
         
         converter.optimizations = [tf.lite.Optimize.DEFAULT]
         converter.inference_input_type = tf.float32 # was set to int8 in tpu
@@ -1015,11 +1092,9 @@ def save_all_tflite_models(app, x_gen, model_type, hot_size_pi):
         try:
             tflite_model = converter.convert()
             open(tflite_default, "wb").write(tflite_model) # tflite_model_size is a file name
-            print('\nPABOU:===== OK %s. quantized weights, but other variable data is still in float format.\n\n' %tflite_default)
-            
-            see_tflite_tensors(tflite_model)
-
+            print('\nPABOU:============================ OK %s. quantized weights, but other variable data is still in float format.\n' %tflite_default)
             print('full model %0.1f, lite mode %0.1f ' %( os.path.getsize(h5_file)/meg, os.path.getsize(tflite_default)/meg )) 
+            see_tflite_tensors(tflite_model)
 
             try:
                 add_tflite_meta_data(app, tflite_default, model_type, hot_size_pi, description) # pass file name which exist in file system, not binary model
@@ -1028,34 +1103,30 @@ def save_all_tflite_models(app, x_gen, model_type, hot_size_pi):
                 print('PABOU: cannot add metadata to %s. %s. maybe model 2' %(tflite_fp32, str(e)))
 
         except Exception as e:
-            print('\nPABOU:==== Exception converting to tflite weigth int', str(e))
+            print('PABOU:==== Exception converting to tflite weigth int', str(e))
     
 
-   
-
     def default_variable(model_type, hot_size_pi, description):
-
         #############################################################
         # case 3.1: dynamic range. fixed and variable params
-        # use representative data set
         # 4x smaler, 2,3 x speed
-        # for CPU
+        # for CPU 
+        # USES representative data set
         #############################################################
 
-        print('\nPABOU: fixed and variable converted to int8. creates file: %s \n' % tflite_default_representative)
+        print('PABOU: fixed and variable converted to int8. creates file: %s \n' % tflite_default_representative)
 
-        
+        converter = tf.lite.TFLiteConverter.from_saved_model(tf_dir)
+
         converter.optimizations = [tf.lite.Optimize.DEFAULT]
         converter.representative_dataset = representative_dataset_gen
 
         try:
             tflite_model = converter.convert()
             open(tflite_default_representative, "wb").write(tflite_model) # tflite_model_size is a file name
-            print('\nPABOU:===== OK %s. fiwed and variable quantized .\n\n' %tflite_default)
-            
-            see_tflite_tensors(tflite_model)
-
+            print('\nPABOU:=================== OK %s. fixed and variable quantized.\n' %tflite_default)
             print('full model %0.1f, lite mode %0.1f ' %( os.path.getsize(h5_file)/meg, os.path.getsize(tflite_default_representative)/meg )) 
+            see_tflite_tensors(tflite_model)
 
             try:
                 add_tflite_meta_data(app, tflite_default_representative, model_type, hot_size_pi, description) # pass file name which exist in file system, not binary model
@@ -1064,7 +1135,7 @@ def save_all_tflite_models(app, x_gen, model_type, hot_size_pi):
                 print('PABOU: cannot add metadata to %s. %s. maybe model 2' %(tflite_fp32, str(e)))
 
         except Exception as e:
-            print('\nPABOU:==== Exception converting to tflite weigth int', str(e))
+            print('PABOU:==== Exception converting to tflite weigth int', str(e))
 
             
     def int_fp_fallback(model_type, hot_size_pi, description):
@@ -1072,11 +1143,15 @@ def save_all_tflite_models(app, x_gen, model_type, hot_size_pi):
         # case 4: full integer quantization . all math integer
         # measure dynamic range thru sample data
         # 4x smaller, 3x speeded
-        # CPU,  not tpu TPU, micro as input/output still float
+        # CPU,  not tpu TPU, micro as input/output still  
+        # USES representative data set
         ##############################################################
 
 
         """
+        Note: This tflite_quant_model won't be compatible with integer only devices (such as 8-bit microcontrollers) 
+        and accelerators (such as the Coral Edge TPU) because the input and output still remain float in order to have the same interface as the original float only model.
+        
         You can get further latency improvements, reductions in peak memory usage, and compatibility with integer 
         only hardware devices or accelerators by making sure all model math is integer quantized.
 
@@ -1086,10 +1161,6 @@ def save_all_tflite_models(app, x_gen, model_type, hot_size_pi):
         Integer with float fallback (using default float input/output)
         In order to fully integer quantize a model, but use float operators when they don't have an integer implementation (to ensure conversion occurs smoothly),
         use the following steps:
-
-        This tflite_quant_model won't be compatible with integer only devices (such as 8-bit microcontrollers) and 
-        accelerators (such as the Coral Edge TPU) because the input and output still remain float in order to have the 
-        same interface as the original float only model.
 
         That's usually good for compatibility, but it won't be compatible with devices that perform only integer-based operations, 
         such as the Edge TPU.
@@ -1103,7 +1174,20 @@ def save_all_tflite_models(app, x_gen, model_type, hot_size_pi):
         However, to maintain compatibility with applications that traditionally use float model input and output tensors, the TensorFlow Lite Converter leaves the model input and output tensors in float:
         """
 
-        print('\nPABOU: full integer quantization, with fall back to fp. need representative data set. creates: %s \n' %tflite_int_fp_fallback)
+        """
+        to rescale at inference time see post_training_integer_quant colab
+        # Check if the input type is quantized, then rescale input data to uint8
+        if input_details['dtype'] == np.uint8:
+            input_scale, input_zero_point = input_details["quantization"]
+            test_image = test_image / input_scale + input_zero_point
+
+            test_image = np.expand_dims(test_image, axis=0).astype(input_details["dtype"])
+            interpreter.set_tensor(input_details["index"], test_image)
+
+        """
+
+        print('PABOU: full integer quantization, with fall back to fp. need representative data set. creates: %s \n' %tflite_int_fp_fallback)
+        converter = tf.lite.TFLiteConverter.from_saved_model(tf_dir)
         converter.optimizations = [tf.lite.Optimize.DEFAULT]
         converter.representative_dataset = representative_dataset_gen
 
@@ -1111,12 +1195,10 @@ def save_all_tflite_models(app, x_gen, model_type, hot_size_pi):
         try:
             tflite_model = converter.convert()
             open(tflite_int_fp_fallback, "wb").write(tflite_model)
-            print('\nPABOU:===== OK %s. However, to maintain compatibility with applications that traditionally use float model input and output tensors, the TensorFlow Lite Converter leaves the model input and output tensors in float.\n\n' %tflite_int_fp_fallback)
-            
+            print('\nPABOU:====================== OK %s. However, to maintain compatibility with applications that traditionally use float model input and output tensors, the TensorFlow Lite Converter leaves the model input and output tensors in float.\n' %tflite_int_fp_fallback)
+            print('full model %0.1f, lite mode %0.1f ' %( os.path.getsize(h5_file)/meg, os.path.getsize(tflite_int_fp_fallback)/meg ))
             see_tflite_tensors(tflite_model)
 
-            print('full model %0.1f, lite mode %0.1f ' %( os.path.getsize(h5_file)/meg, os.path.getsize(tflite_int_fp_fallback)/meg ))
-            
             try:
                 add_tflite_meta_data(app, tflite_int_fp_fallback, model_type, hot_size_pi, description) # pass file name which exist in file system, not binary model
                 # model 1 only for now
@@ -1124,7 +1206,7 @@ def save_all_tflite_models(app, x_gen, model_type, hot_size_pi):
                 print('PABOU: cannot add metadata to %s. %s. maybe model 2' %(tflite_fp32, str(e)))
 
         except Exception as e:
-            print('\nPABOU:===== Exception converting to tflite int fall back fp', str(e))
+            print('PABOU:===== Exception converting to tflite int fall back fp', str(e))
         
 
     def fp16(model_type, hot_size_pi, description):
@@ -1143,20 +1225,19 @@ def save_all_tflite_models(app, x_gen, model_type, hot_size_pi):
         use the following steps:
         """
 
-        print('\nPABOU: quantization FP16. GPU acceleration delegate.  creates file: %s\n' % tflite_fp16)
+        print('PABOU: quantization FP16. GPU acceleration delegate.  creates file: %s\n' % tflite_fp16)
+        converter = tf.lite.TFLiteConverter.from_saved_model(tf_dir)
         converter.optimizations = [tf.lite.Optimize.DEFAULT]
         converter.target_spec.supported_types = [tf.float16]
 
         try:
-            # COLAB 2.4 TFLITE_BUILTINS_INT8 requires smallest supported type to be INT8.
+            
 
             tflite_model = converter.convert()
             open(tflite_fp16, "wb").write(tflite_model)
-            print('\nPABOU:==== OK FP16, GPU delegate. ', tflite_fp16)
-
-            see_tflite_tensors(tflite_model)
-
+            print('\nPABOU:================================= OK FP16, GPU delegate %s.\n' %tflite_fp16)
             print('full model %0.1f, lite mode %0.1f ' %( os.path.getsize(h5_file)/meg, os.path.getsize(tflite_fp16)/meg )) 
+            see_tflite_tensors(tflite_model) # still fp32
 
             try:
                 add_tflite_meta_data(app, tflite_fp16, model_type, hot_size_pi, description) # pass file name which exist in file system, not binary model
@@ -1165,7 +1246,7 @@ def save_all_tflite_models(app, x_gen, model_type, hot_size_pi):
                 print('PABOU: cannot add metadata to %s. %s. maybe model 2' %(tflite_fp32, str(e)))
 
         except Exception as e:
-            print('\nPABOU:===== Exception converting to tflite FP16. ', str(e))
+            print('PABOU:===== Exception converting to tflite FP16. ', str(e))
         
 
     def experimental(model_type, hot_size_pi, description):
@@ -1186,7 +1267,8 @@ def save_all_tflite_models(app, x_gen, model_type, hot_size_pi):
         Currently it is incompatible with the existing hardware accelerated TFLite delegates.
         """
 
-        print('\nPABOU: quantization 16x8.  creates file: %s\n ' % tflite_16by8)
+        print('PABOU: quantization 16x8.  creates file: %s\n ' % tflite_16by8)
+        converter = tf.lite.TFLiteConverter.from_saved_model(tf_dir)
 
         converter.representative_dataset = representative_dataset_gen
         converter.optimizations = [tf.lite.Optimize.DEFAULT]
@@ -1197,7 +1279,6 @@ def save_all_tflite_models(app, x_gen, model_type, hot_size_pi):
         but unsupported operators kept in float. The following option should be added to the target_spec to allow this.
         """
         #converter.target_spec.supported_ops = [tf.lite.OpsSet.EXPERIMENTAL_TFLITE_BUILTINS_ACTIVATIONS_INT16_WEIGHTS_INT8, tf.lite.OpsSet.TFLITE_BUILTINS]
-        
         
         #add tf.lite.Opset.TFLITE_BUILTINS to keep unsupported ops in float
 
@@ -1210,11 +1291,9 @@ def save_all_tflite_models(app, x_gen, model_type, hot_size_pi):
             
             tflite_model = converter.convert()
             open(tflite_16by8, "wb").write(tflite_model)
-            print('\nPABOU:===== OK int only with activation 16 bits\n\n', tflite_16by8)
-
-            see_tflite_tensors(tflite_model)
-
+            print('\nPABOU:===== OK int only with activation 16 bits %s \n' %tflite_16by8)
             print('full model %0.1f, lite mode %0.1f ' %( os.path.getsize(h5_file)/meg, os.path.getsize(tflite_16by8)/meg )) 
+            see_tflite_tensors(tflite_model)
 
             try:
                 add_tflite_meta_data(app, tflite_16by8, model_type, hot_size_pi, description) # pass file name which exist in file system, not binary model
@@ -1223,52 +1302,69 @@ def save_all_tflite_models(app, x_gen, model_type, hot_size_pi):
                 print('PABOU: cannot add metadata to %s. %s. maybe model 2' %(tflite_fp32, str(e)))
 
         except Exception as e:
-            print('\nPABOU:===== Exception converting to tflite 16x8', str(e))
+            print('PABOU:===== Exception converting to tflite 16x8', str(e))
 
 
     ######################################
     # run all TFlite conversions
-    #####################################   
-
-    # order of conversion is define here
-
-    # works OK on windows tf2.4.1 and on colab
-    # input output are fp32
     # metadata is only for model 1
-
-    fp32(model_type,hot_size_pi, 'fp32 TFlite model. input/output are fp32 .input are one hot encoded pitch index') # metadata only for type 1
-    default(model_type,hot_size_pi, 'default TFlite model. Weigths encoded to int8. input/output are fp32 input are one hot encoded pitch index') # Weigth to int8
-    fp16(model_type,hot_size_pi, 'fp16 TFlite model. inpout/output are fp32. input are one hot encoded pitch index')
-    experimental(model_type,hot_size_pi, 'experimental TFlite model. input/output are fp32. input are one hot encoded pitch index')
+    ##################################### 
     
+    # All except fp32 and GPU are small models  
+
     # below uses representative data generator
+    tpu(model_type,hot_size_pi, 'INT8 only. For TPU, CPU, Micro. input/output are int8.') 
+    default_variable(model_type,hot_size_pi, 'default with representative data set. Fixed and variable are int8. input/output are uint8.')
+    int_fp_fallback(model_type,hot_size_pi, 'Integer with floating point fall back. input/output are FLOAT.') # However, to maintain compatibility with applications that traditionally use float model input and output tensors, the TensorFlow Lite Converter leaves the model input and output tensors in float.
+    experimental(model_type,hot_size_pi, 'experimental TFlite model. input/output are fp32.') #Quantization to 16x8-bit not yet supported for op: 'UNIDIRECTIONAL_SEQUENCE_LSTM'.
+    
+    # do not use the generator
+    fp32(model_type,hot_size_pi, 'fp32 TFlite model. input/output are fp32.')
+    default(model_type,hot_size_pi, 'default TFlite model. Weigths encoded to int8.')
+    fp16(model_type,hot_size_pi, 'fp16 TFlite model. inpout/output are fp32.')
 
-    # BACH
-    # does not work on Windows for bach. 
+    print('\nPABOU: All tfLite models created as .tflite files')
 
-    # does not work on colab for bach
-    # Exception converting to tflite INT8 only  module 'tensorflow.lite.python.schema_py_generated' has no attribute 'Model'
-    # Exception converting to tflite weigth int module 'tensorflow.lite.python.schema_py_generated' has no attribute 'Model'
-    # Exception converting to tflite int fall back fp module 'tensorflow.lite.python.schema_py_generated' has no attribute 'Model'
-    # Exception converting to tflite INT8 only  Failed to parse the model: pybind11::init(): factory function returned nullptr.
- 
-    # seems bug with RNN and INT
+    ######################################
+    # creates model.cpp file for micro
+    """
+    Arduino expects the following:
+    #include "model.h"
+    alignas(8) const unsigned char model_tflite[] = {
+    const unsigned int model_tflite_len = 92548;
+    """
 
-    # MNIST
-    # work on colab for MNIST
-    # does not work on Windows module 'tensorflow.lite.python.schema_py_generated' has no attribute 'Model
+    # select tflite model quantization to convert to C 
+    # fp32 and GPU are big. other are smaller
+    # in WSL models  xxd -i ***.tflite > model.cpp
+    # edit model.cpp to include above, both array definition and len
+    # copy resulting model.cpp into arduino folder, as model.cpp (so that it get compiled and linked)
+    # no need to touch model.h in arduino folder
+    ######################################
 
-   
-    # order seems to matter, otherwize fp32 will get int8 input.
-    #PABOU:===== Exception converting to tflite FP16.  TFLITE_BUILTINS_INT8 requires smallest supported type to be INT8.
+    out = os.path.join('models', app + micro_model_file)
+    in_ = os.path.join('models', app + tflite_int_only_file)
+    print ('PABOU: convert INT8 only tflite file to micro-controler. C file: %s, from %s' %(out, in_))
+    try:
+        s = 'xxd -i ' + in_  + ' > ' + out
+        os.system(s) # exception stays in shell
+    except:
+        print('PABOU: cannot create model.cpp. xxd not found. please run on linux or WSL')
 
-    tpu(model_type,hot_size_pi, 'INT8 only . For TPU, CPU, Micro. input/output are uint8. input are one hot encoded pitch index') # work on colab tf 2.4.1. does not seem to work on conda with tf 2.4.1
-    default_variable(model_type,hot_size_pi, 'default with representative data set. Fixed and variable are int8. input/output are uint8. input are one hot encoded pitch index')
-    int_fp_fallback(model_type,hot_size_pi, 'Integer with floating point fall back. input/output are uint8. input are one hot encoded pitch index')
+    ######################################
+    # creates EDGE TPU model
+    # compiler only run on linux
+    # https://colab.research.google.com/github/google-coral/tutorials/blob/master/compile_for_edgetpu.ipynb
+    # The filename for each compiled model is input_filename_edgetpu.tflite
+    ######################################
 
-    print('\n\nPABOU: All tfLite models created as .tflite files')
-
-
+    in_ = os.path.join('models', app + tflite_int_only_file)
+    try:
+        s = 'edgetpu_compiler -s -o ' + os.path.join('models' , 'edge')  +  ' ' + in_
+        print('PABOU: create edgetpu model ', s)
+        os.system(s) # if not found, will not raise exception here. 
+    except:
+        print('PABOU: cannot create edgetpu model. please run on Linux or WSL')
 
 
 #####################################################
@@ -1281,7 +1377,6 @@ def save_all_tflite_models(app, x_gen, model_type, hot_size_pi):
 # param: string, model object, test set x and y, number of iteration, h5 file size
 
 def bench_full(st, model, x_test, y_test, x1_test, y1_test, x2_test, y2_test, nb, h5_size, model_type):
-    
     
     # use test set; x_test.shape (3245, 40, 483), y_test.shape (3245, 483)
     #1 and 2 are None for model 1
@@ -1299,48 +1394,48 @@ def bench_full(st, model, x_test, y_test, x1_test, y1_test, x2_test, y2_test, nb
     pt.field_names = ["model", "iters", "infer (ms)",  "acc pi", "acc du", "acc ve",  "h5 size", 'TFlite size']
     
     ##############################################
-    # full model, iterate , ie one at a time like TFlite invoque
+    # full model, iterate on single sample, ie one at a time like TFlite invoque
     # iterate, return one softmax
     ##############################################
 
     start_time = time.time() 
-    
     for i in range(nb):  # use for loop as for lite (one inference at a time)
 
         if model_type == 2:
             if x2_test != []:  # velocity
             # test on [] vs None
-                x = [x_test[i], x1_test[i], x2_test[i]] # x list of 3 list of seqlen int
+                input = [x_test[i], x1_test[i], x2_test[i]] # x list of 3 list of seqlen int
                 y = [y_test[i], y1_test[i], y2_test[i]]
             else:
-                x = [x_test[i], x1_test[i]]
+                input = [x_test[i], x1_test[i]]
                 y = [y_test[i], y1_test[i]]
 
-        if model_type == 1:  
-                x =x_test[i]  #  one hot len 40  (40, 483)
-                y =y_test[i]  # one hot, len 483 (483,)
-        
-        # keras need a batch dimension # got from (40,483) to (1,40,483). 40 is seqlen. 483 is one hot size with concatenate
-        if model_type == 1:
-            input = np.expand_dims(x,axis=0)    #Error when checking input: expected flatten_2_input to have 3 dimensions, but got array with shape (28, 28)
-            
-        else:
-            input = x # not sure need to add batch dimension for multihead
+        if model_type in [1,3]:  
+            y =y_test[i]  # one hot, len 483 (483,)
+            input = x_test[i]
+            input = np.expand_dims(input,axis=0)
 
+        if model_type == 4:
+            # need to reshape size*size sequence into size x size matrix. assumes squared matrix 
+            input = x_test[i]
+            d = input.shape[0]
+            d = int(math.sqrt(d))
+            input = np.reshape(input, (d, d))
+            input = np.expand_dims(input,axis=0)
+            input = np.expand_dims(input,axis=-1) # (1,6,6,1) 
         
+
         result = model.predict(input) # Keras call. 
 
         # for model 2, result[[]]  is a list of multiple softmax.  result[0] [0] (pitches), result[1] [0] , result[2] [0]
         # nothing identify which param the softmax refers to, assume same order from model definition
         # np.sum(result[0] [0]) = 1
         #results = np.squeeze(output_data) is the same as [0]
-
         # model 1 result is [[]] result[0] is a simple softmax for pitches.  result[1] does not exist 
-        
-        
+    
         elapse = (time.time() - start_time)*1000.0 # time.time() nb of sec since 1070. *1000 to get ms
 
-        if model_type == 1:
+        if model_type in [1,3,4]:
             softmax = result[0] # squeeze
 
         if model_type == 2:
@@ -1384,9 +1479,18 @@ def bench_full(st, model, x_test, y_test, x1_test, y1_test, x2_test, y2_test, nb
     error_pi = 0
     start_time = time.time()
 
-    if model_type == 1:
+    if model_type in [1,3]:
         result=model.predict(x_test[:nb]) # list of softmax
         # result.shape (100, 483)   list of 100 softmax .  for MNIST (100,10)
+
+    if model_type in [4]:
+        slice = x_test[:nb]
+        d = x_test[0].shape[0]
+        d = int(math.sqrt(d))
+        slice = np.reshape(slice, (slice.shape[0],d, d))
+        input = np.expand_dims(input,axis=-1) # (100,6,6,1) 
+        result=model.predict(slice) # list of softmax
+
 
     if model_type == 2 and x2_test != []:
         result=model.predict([x_test[:nb], x1_test[:nb], x2_test[:nb]])
@@ -1405,7 +1509,6 @@ def bench_full(st, model, x_test, y_test, x1_test, y1_test, x2_test, y2_test, nb
     elapse_per_iter = elapse/float(nb)
 
 
-    
     # average accuracy for pitches
     
     for i in range(nb):
@@ -1414,7 +1517,7 @@ def bench_full(st, model, x_test, y_test, x1_test, y1_test, x2_test, y2_test, nb
 
             if model_type == 2:
                 softmax = result[0] [i]
-            if model_type == 1: 
+            if model_type in [1,3,4]: 
                 softmax = result[i]
 
             if np.argmax(softmax) != np.argmax(y_test[i]): # y[i] is a one hot same as we start x_test[:nb]
@@ -1437,301 +1540,17 @@ def bench_full(st, model, x_test, y_test, x1_test, y1_test, x2_test, y2_test, nb
     print('\n',pt,'\n')
     
 
-##########################################################
-# TF lite inference
-# x single sample
-# x1 and x2 could be  []
-##########################################################
+# cannot import at the same time tensorflow and coral run time generic
+# generic module which can work with tf or coral
+# someone must import either tf or coral runtime before
+# contain single inference and benchmark
+# benchmark creates interpreter
+# when imported from pabou, cannot be used for coral benchmark
+# to use for coral benchmark, call from main before importing tensorflow. need X and Y
+print('PABOU: import lite_inference')
+import lite_inference
+# contains inference and bench lite one model
 
-def TFlite_single_inference(x_test, x1_test, x2_test , TFlite_file, model_type):
-    # x_test.shape  (40, 483)
-    inter = tf.lite.Interpreter(TFlite_file) # could be done outside only once
-
-    inter.allocate_tensors()
-
-    input_details= inter.get_input_details()
-    #[{'dtype': <class 'numpy.float32'>, 'index': 0, 'name': 'serving_default_input_1:0', 'quantization': (...), 'quantization_parameters': {...}, 'shape': array([  1,  40, 483]), 'shape_signature': array([ -1,  40, 483]), 'sparsity_parameters': {}}]
-    # for model 2 list of 3 dict  input_details [0] , input_details [1], ...
-    # for model 1 ist with one dict.  
-    # keys: dtype, shape , name , quantization ..
-
-    output_details= inter.get_output_details() 
-    #[{'dtype': <class 'numpy.float32'>, 'index': 62, 'name': 'StatefulPartitionedCall:0', 'quantization': (...), 'quantization_parameters': {...}, 'shape': array([  1, 483]), 'shape_signature': array([ -1, 483]), 'sparsity_parameters': {}}]
-    
-    ##########################################################
-    # look at input output details
-    # build dict output head name to index
-    ##########################################################
-    """
-    0  velocity , output shape [1 5]
-    1  pitch , output shape [  1 129]   array([  1,  40, 483] input for model 1
-    2 duration , output shape [ 1 41]
-    order in list of dict not then same as model definition 
-    """
-    d={}    # mapping layer name to index used in input, output details
-    # d['picth] is index    input_details[index] ['index', 'shape' , etc ..]
-
-    if model_type == 2:
-        try:
-            for i in [0,1,2]: # WARNING. 2 only if velocity 
-                #print('PABOU: TF lite input type %s, output type %s'%(input_details[i] ['dtype'],output_details[i]['dtype']))
-                #print('PABOU: TF lite input shape %s, output shape %s'%(input_details[i]['shape'],output_details[i]['shape']))
-                #print('PABOU: TF lite input name %s, output name %s'%(input_details[i]['name'],output_details[i]['name']))
-                
-                name = input_details [i] ['name']
-                name = name.split('_') [-1]
-                name = name.split(':')[0]
-                d[name] = i
-                #print (d) # map name of output head to index used in input_details[index]
-
-        except Exception as e:
-            print('PABOU: look at input output details ',str(e))
-            
-
-        try:
-            for i in [0,1,2]: # number or output heads
-                assert input_details[i] ['dtype'] in [np.float32 ,  np.int8, np.uint8]
-        except Exception as e:
-            print('PABOU: input details unexpected', str(e))
-
-    
-    if model_type == 1: # pitch index 0 as the only one; if multiple head, this is not gatenteed
-        try:
-            for i in [0]: # could avoid  input_details[i] is just input_details
-                    #print('PABOU: TF lite input type %s, output type %s'%(input_details[i] ['dtype'],output_details[i]['dtype']))
-                    #print('PABOU: TF lite input shape %s, output shape %s'%(input_details[i]['shape'],output_details[i]['shape']))
-                    #print('PABOU: TF lite input name %s, output name %s'%(input_details[i]['name'],output_details[i]['name']))
-
-                    # build dict to map names to softmax
-
-                    name = input_details [i] ['name']   # TF lite input name serving_default_flatten_input:0
-                    name = name.split('_') [-1]
-                    name = name.split(':')[0]
-                    
-                    #print(name)
-                    d[name] = i  # {'pitch' : 0} for model 1
-                    #print (d)
-        except Exception as e:
-            print('PABOU: look at input output details ',str(e))
-
-    # Check if the input type is quantized, then rescale input data to uint8
-
-    if model_type == 1:
-        if input_details[0]['dtype'] == np.uint8:
-            #print('PABOU: input are uint8')
-            input_scale, input_zero_point = input_details[0]["quantization"]
-            x_test = x_test / input_scale + input_zero_point
-
-    if model_type == 2:
-        index = d['pitch'] 
-        if input_details[index]['dtype'] == np.uint8:
-            #print('PABOU: pitch input are uint8')
-            input_scale, input_zero_point = input_details[index]["quantization"]
-            x_test = x_test / input_scale + input_zero_point
-
-        index = d['duration']
-        if input_details[index]['dtype'] == np.uint8:
-            #print('PABOU: duration input are uint8')
-            input_scale, input_zero_point = input_details[index]["quantization"]
-            x1_test = x1_test / input_scale + input_zero_point
-
-        if x2_test != []:  # velocity
-                index = d['velocity']
-                if input_details[index]['dtype'] == np.uint8:
-                    #print('PABOU: velocity input are uint8')
-                    input_scale, input_zero_point = input_details[index]["quantization"]
-                    x2_test = x2_test / input_scale + input_zero_point
-
-    # single inference
-
-    #################################
-    # model 1
-    #################################
-
-    if model_type == 1:
-
-        input_x = np.expand_dims(x_test, axis=0).astype(input_details[0]["dtype"])
-        # 'cast' x_test to expected input float or uint or else , for MNIST (1,28,28) dtype uint8
-
-        #test_image = np.expand_dims(test_image, axis=0).astype(input_details["dtype"])
-
-        #input_x = np.float32(input_x) # NO. could be int8
-
-        try:
-            index = d['pitch'] # should be 0 for model type 1
-        except:
-            index = d['input'] # MNIST output name 
-        inter.set_tensor(input_details[index]['index'], input_x) 
-
-
-    #################################
-    # model 2
-    #################################
-
-    if model_type == 2:
-
-        ############################
-        # for all output head
-        # get index
-        # add batch dimension and cast to rigth type
-        ############################
-
-        index = d['pitch'] 
-        
-        input_x = x_test
-        input_x = np.expand_dims(input_x, axis=0).astype(input_details[index]["dtype"])
-        inter.set_tensor(input_details[index]['index'], input_x)   
-
-        # error there. TFlite expect shape [1,1] and input_x is [1,40 ] ie seqlen
-        # FINALLY set input shape in model definition (40,)  was(None,) 
-
-        #fhttps://www.tensorflow.org/lite/guide/faq
-    
-
-        index = d['duration']
-        input_x = x1_test
-        input_x = np.expand_dims(input_x, axis=0).astype(input_details[index]["dtype"])         
-        inter.set_tensor(input_details[index]['index'], input_x)
-
-        if x2_test != []:  # velocity
-            index = d['velocity']
-            input_x = x2_test
-            input_x = np.expand_dims(input_x, axis=0).astype(input_details[index]["dtype"])
-            inter.set_tensor(input_details[index]['index'], input_x)
-        # velocity
-    
-    
-    ###########################################
-    inter.invoke()
-    ###########################################
-
-    # output_details list of dict. same order as input
-
-
-    if model_type == 1:
-        softmax_pi = inter.get_tensor(output_details[0]['index']) [0]
-        # array([  0,   0,   0,   1,   0,   7,   0,   0, 247,   0], dtype=uint8) for TPU MNI[ST
-        softmax_du = []
-        softmax_ve = []
-    
-    if model_type == 2:
-        softmax_pi = inter.get_tensor(output_details[d['pitch']]['index']) [0]
-        softmax_du = inter.get_tensor(output_details[d['duration']]['index']) [0]
-        if x2_test != []:
-            softmax_ve = inter.get_tensor(output_details[d['velocity']]['index']) [0]
-        
-    return(softmax_pi, softmax_du, softmax_ve)
-
-
-#####################################################
-# benchmark TFlite for ONE quantized model, passed as parameter as file name
-# only iteration (vs slide)
-# look at ELAPSE and ACCURACY (vs simple inference). use test set as input
-# display with pretty table
-# params: any string, file name of TFlite model, x test, y test, number of inferences, TFlite file size
-#####################################################
-def bench_lite_one_model(st,TFlite_file,x_test,y_test,x1_test, y1_test,x2_test, y2_test, nb, model_type, app):
-
-    print("\nPABOU: running LITE benchmark %s for : %s, model type %d, app %s: " %(st,TFlite_file, model_type, app))
-
-    TFlite_file_size = round(float(os.path.getsize(TFlite_file)/(1024*1024)),1) # to print in table
-
-    h5_size = get_h5_size(app)
-
-    # create table
-    pt = PrettyTable()
-    pt.field_names = ["model", "iters", "infer (ms)",  "acc pi", "acc du", "acc ve",  "h5 size", 'TFlite size']
-
-    # 1 and 2 are [] for model 1
-    # 2 is [] for model 2 and no velocity
-
-    # x_test[0] array of int for model 2 (embedding), len = seqlen   # x_test[i] (40,0)
-    # x_test[i] one hot for model 1
-
-    error_pi = 0
-    error_du = 0
-    error_ve = 0
-
-    start_time = time.time()
-
-    for i in range(nb):  
-        ############################
-        # inference
-        ############################
-
-
-        if x1_test == []:  # avoid out of range
-            x1= []
-        else:
-            x1 = x1_test[i]
-
-        if x2_test== []:
-            x2= []
-        else:
-            x2 = x2_test[i]
-
-        (softmax_pi, softmax_du, softmax_ve) = \
-        TFlite_single_inference(x_test[i], x1, x2, TFlite_file, model_type)
-        
-        # test if Y is a softmax (bach) or an int (MNITS)
-        # softmax is not a LIST but an ndarray
-        
-        # accuracy for one inference
-        if isinstance(y_test[i],np.ndarray):
-            if np.argmax(softmax_pi) != np.argmax(y_test[i]): # use squeeze to get from [[ ]] to []
-                error_pi = error_pi + 1
-        else:
-            if np.argmax(softmax_pi) != y_test[i]: 
-                error_pi = error_pi + 1
-
-
-        if model_type == 2:
-            
-            if isinstance(y_test[i],np.ndarray):
-                if np.argmax(softmax_du) != np.argmax(y1_test[i]): 
-                    error_du = error_du + 1
-            else:
-                if np.argmax(softmax_du) != y1_test[i]: # use squeeze to get from [[ ]] to []
-                    error_du = error_du + 1
-
-
-            if x2_test != []: # means velocity
-                if isinstance(y_test[i],np.ndarray):
-                    if np.argmax(softmax_ve) != np.argmax(y2_test[i]): # use squeeze to get from [[ ]] to []
-                        error_ve = error_ve + 1
-                else:
-                    if np.argmax(softmax_ve) != y2_test[i]: # use squeeze to get from [[ ]] to []
-                        error_ve = error_ve + 1
-
-        # error are initialized at 0. so if not use stays zero
-    # for range
-    
-    elapse = (time.time() - start_time)*1000.0
-
-    # average elapse per iteration
-    elapse_per_iter = elapse / float(nb)
-
-    # accuracies
-    e1= float(nb - error_pi) / float(nb)
-    e2= float(nb - error_du) / float(nb)
-    e3= float(nb - error_ve) / float(nb)
-    
-    
-    print("\nPABOU: TF lite model: %s. elapse %0.5f ms, %d samples." % (TFlite_file, round(elapse_per_iter,2), nb))
-    print("\nPABOU: acc pi: %0.2f, acc du: %0.2f, acc ve: %0.2f. " % (e1,e2,e3))
-
-    # models\mnist_quantized-with-floating-point-fallback.tflite
-    # TFfile name can be long. screw pretty table
-
-    s= TFlite_file.replace('models', '')
-    s = s.replace('.tflite', '')
-    
-    pt.add_row([s, nb, round(elapse_per_iter,2), e1, e2, e3, h5_size, TFlite_file_size ])
-    print('\n\n', pt)
-    
-    # return to print in main
-    return([s, nb, round(elapse_per_iter,2), e1, e2, e3, h5_size,  TFlite_file_size ])
-   
 
 ###################################################
 # MODEL evaluate 
@@ -1740,9 +1559,9 @@ def bench_lite_one_model(st,TFlite_file,x_test,y_test,x1_test, y1_test,x2_test, 
 ####################################################
 def model_evaluate(model, model_type, x , y):
     print("\n\nPABOU: evaluate model on test set") 
-    # x is a list of X for multiple input
+    # x is x_test (3239,100)
 
-    if model_type == 1:
+    if model_type in [1,3]:
         # x single vs array 
         score = model.evaluate(x, y, verbose = 0 )  # evaluate verbose  1 a lot of =
         # do not use dict, so get a list
@@ -1761,6 +1580,25 @@ def model_evaluate(model, model_type, x , y):
         print('model accuracy from any dataset')
         pabou.see_model_accuracy(model, x_train, y_train)
         """
+
+    if model_type == 4: # (3239,100)
+
+        # already reshaped
+        #d = x[0].shape[0]
+        #d = int(math.sqrt(d))
+        #x = np.reshape(x, (x.shape[0], d, d))
+
+        score = model.evaluate(x, y, verbose = 0 )  # evaluate verbose  1 a lot of =
+
+        print('PABOU: evaluate score list: ',score) # [4.263920307159424, 0.11587057262659073]
+        print('PABOU: metrics: ', model.metrics_names , type(model.metrics_names))
+
+        test_pitch_accuracy = round(score [1],2)
+        print('PABOU: test pitch accuracy %0.2f' %(test_pitch_accuracy))
+
+        test_duration_accuracy = 0.0 # procedure returns then 3 metrics even in model 1
+        test_velocity_accuracy = 0.0
+
 
     if model_type == 2:
         # use dict
@@ -1799,31 +1637,103 @@ def model_evaluate(model, model_type, x , y):
 
 #########################################
 # temperature
-# alter prediction softmax, return new.
+# ALTERNATIVE method to selecting argmax from model output
+# reshape proba, and sample at random from new proba 
+
+# alter prediction softmax, return new softmax = sampling, ie 1 with other zero, from which we get argmax.
+# temp = 1 new softmax = input softmax and sampling is based on probability output by the model
+# temp = 0.2 even more probability to sample original argmax
+# temp = 2 increase probability of selecting other than argmax
 #########################################
-def get_temperature_pred(pred, temp):
+def get_temperature_pred(input_softmax, temp = 1.0):
     
-    p=np.asarray(pred).astype('float64')
+    input_softmax=np.asarray(input_softmax).astype('float64')
     # temperature magic
-    p=np.log(p) / float(temp)
-    p=np.exp(p)
-    # make it a proba
-    p= p / np.sum(p) 
-    p = np.random.multinomial(1,p,1)
-    return(p)
+    # log will create array of negative numbers as all element of softmax are less than 1
+    preds=np.log(input_softmax) / float(temp) # np.log base e  np.log10 base 10 np.log2 base 2
+
+    # make it a softmax again
+    e_preds=np.exp(preds)
+    new_softmax= e_preds / np.sum(e_preds) 
+
+    proba = np.random.multinomial(1,new_softmax,1)
+    """
+    draw at random based on new_softmax probalility
+    so do not take straigth the argmax 
+
+    1 number of experiment, ie one run
+    probability of the p different outcome
+    number of runs. if =1 return is [[x,x,x,x]] , else [[], [] ]
+
+    return drawn sample
+
+
+    Throw a dice 20 times:
+    np.random.multinomial(20, [1/6.]*6, size=1)
+    array([[4, 1, 7, 5, 2, 1]]) # random
+    It landed 4 times on 1, once on 2, etc.
+
+    Now, throw the dice 20 times, and 20 times again:
+    np.random.multinomial(20, [1/6.]*6, size=2)
+    array([[3, 4, 3, 3, 4, 3], # random
+       [2, 4, 3, 4, 0, 7]])
+
+    """
+    return(proba)
+
+
+##############################################
+# create corpus and dictionaries as .cpp file for microcontroler
+##############################################
+def create_corpus_cc(app, a):
+    # input is list of int 
+    # creates a C array declaration file, which can be included in a Cpp environment
+
+    in_ = os.path.join('models', corpus_cc)
+    print ('PABOU: create corpus.cc: %s. len %d' %(in_, len(a)))
+
+    with open(in_, 'wt') as fp: # open as text (default)
+        #fp.write('#include "corpus.h"\n')
+        fp.write ('const int corpus[] = {\n ')
+
+        i = a[0]
+        s = '0x%x' %i
+        fp.write(s)
+
+        for i in a[1:]:
+            s = ', 0x%x' %i
+            fp.write(s)
+            #b = (i).to_bytes(nbytes,byteorder='big')
+            #fp.write(b) 
+            # a bytes-like object is required, not 'int'
+            # bytes(i) return i NULL bytes
+
+        fp.write('\n};\n')
+
+        #unsigned int model_tflite_len = 92548;
+        fp.write ('const unsigned int corpus_len = ' + str(len(a)) + ';\n')
 
 
 
+def create_dict_cc(app, a):
+    # input is list of strings 
 
+    in_ = os.path.join('models', dict_cc)
+    print ('PABOU: create dict.cc: %s. len %d' %(in_, len(a)))
 
+    with open(in_, 'wt') as fp: # open as text (default)
+        #fp.write('#include "dictionary.h"\n')
+        fp.write ('char *dictionary[] = {\n ') # const char* generate arduino compilation error
 
+        i = a[0] # a is list of strings
+        s = '"%s"' %i
+        fp.write(s)
 
-
-
-
-
-
-
+        for i in a[1:]:
+            s = ', "%s"' %i
+            fp.write(s)
+        fp.write('\n};\n')
+        fp.write ('const unsigned int dictionary_len = ' + str(len(a)) + ';\n')
 
 
 
